@@ -203,13 +203,13 @@ while true; do
     done
 
     if [[ "${SENDER_ALLOWED}" != "true" ]]; then
-      log "  Skipping — sender ${REPLY_TO} not in allowlist."
+      log "  Skipping UID ${MSG_UID} — sender ${REPLY_TO} not in allowlist."
       continue
     fi
 
     # Skip emails from ourselves
     if [[ "${REPLY_TO}" == "${MY_EMAIL}" ]]; then
-      log "  Skipping — email is from myself."
+      log "  Skipping UID ${MSG_UID} — email is from myself."
       continue
     fi
 

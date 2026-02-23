@@ -22,6 +22,9 @@ while IFS='=' read -r key value; do
   [[ "${key}" =~ ^[[:space:]]*# ]] && continue
   [[ -z "${key// }" ]] && continue
   key="${key// }"
+  # Strip surrounding quotes (single or double) from values
+  value="${value#\"}" ; value="${value%\"}"
+  value="${value#\'}" ; value="${value%\'}"
   export "${key}=${value}"
 done < .env
 
