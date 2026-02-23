@@ -11,7 +11,7 @@ Environment variables:
     IMAP_PASS           Login password or app-specific password
     PEER_EMAIL          Only return messages from this sender (optional)
     IMAP_FOLDER         Folder to check (default: INBOX)
-    MARK_READ           Set to "true" to mark fetched messages as read (default: true)
+    MARK_READ           Set to "true" to mark fetched messages as read (default: false)
     ALLOWED_SENDERS     Comma-separated list of allowed sender emails (fail-closed)
 """
 

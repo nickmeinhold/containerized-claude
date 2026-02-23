@@ -29,12 +29,19 @@ def main():
     password = os.environ.get("IMAP_PASS", "")
     folder = os.environ.get("IMAP_FOLDER", "INBOX")
 
-    conn = imaplib.IMAP4_SSL(host, port, timeout=30)
-    conn.login(user, password)
-    conn.select(folder)
-    conn.uid("store", uid, "+FLAGS", "\\Seen")
-    conn.close()
-    conn.logout()
+    try:
+        conn = imaplib.IMAP4_SSL(host, port, timeout=30)
+        conn.login(user, password)
+        conn.select(folder)
+        conn.uid("store", uid, "+FLAGS", "\\Seen")
+        conn.close()
+        conn.logout()
+    except imaplib.IMAP4.error as e:
+        print(f"IMAP error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error marking message as read: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

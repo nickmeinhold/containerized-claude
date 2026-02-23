@@ -47,6 +47,13 @@ check_required_vars() {
     log "ERROR: Missing required environment variables: ${missing[*]}"
     exit 1
   fi
+
+  # Sender allowlist — fail-closed: refuse to start if unset/empty
+  if [[ -z "${ALLOWED_SENDERS}" ]]; then
+    log "ERROR: ALLOWED_SENDERS is empty or unset — refusing to start (fail-closed)."
+    log "Set ALLOWED_SENDERS to a comma-separated list of allowed sender emails in .env"
+    exit 1
+  fi
 }
 
 # Build the Cc header fragment (with leading \n) or empty string
@@ -182,18 +189,12 @@ while true; do
     log "  Date: ${DATE}"
     log "  Body preview: ${BODY:0:100}..."
 
-    # Sender allowlist — fail-closed: if unset/empty, skip all emails
-    if [[ -z "${ALLOWED_SENDERS}" ]]; then
-      log "  Skipping — ALLOWED_SENDERS is empty (fail-closed)."
-      continue
-    fi
-
     # Check sender against allowlist (case-insensitive)
-    REPLY_TO_LOWER=$(echo "${REPLY_TO}" | tr '[:upper:]' '[:lower:]')
+    REPLY_TO_LOWER=$(tr '[:upper:]' '[:lower:]' <<< "${REPLY_TO}")
     SENDER_ALLOWED=false
     IFS=',' read -ra ALLOWED_ARRAY <<< "${ALLOWED_SENDERS}"
     for ALLOWED in "${ALLOWED_ARRAY[@]}"; do
-      ALLOWED_TRIMMED=$(echo "${ALLOWED}" | tr '[:upper:]' '[:lower:]' | xargs)
+      ALLOWED_TRIMMED=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<< "${ALLOWED}" | tr '[:upper:]' '[:lower:]')
       if [[ "${REPLY_TO_LOWER}" == "${ALLOWED_TRIMMED}" ]]; then
         SENDER_ALLOWED=true
         break
