@@ -24,10 +24,10 @@ RUN useradd -m -s /bin/bash claudius
 RUN mkdir -p /home/claudius/.claude/commands /workspace/logs \
     && chown -R claudius:claudius /home/claudius /workspace
 
-# Copy Claude config (CLAUDE.md, skills, plans)
-COPY claude-config/CLAUDE.md /home/claudius/.claude/CLAUDE.md
-COPY claude-config/commands/ /home/claudius/.claude/commands/
-COPY claude-config/plans/ /home/claudius/.claude/plans/
+# Copy committed Claude config — CLAUDE.md lives in .claude/ (tracked in git).
+# Custom commands/ and plans/ can be added by mounting or extending the image;
+# directories are already created above.
+COPY .claude/CLAUDE.md /home/claudius/.claude/CLAUDE.md
 
 # Copy application files
 COPY settings.json /home/claudius/.claude/settings.json
