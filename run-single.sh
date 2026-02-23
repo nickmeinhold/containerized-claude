@@ -16,8 +16,14 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-# shellcheck source=/dev/null
-source .env
+# Read .env safely without executing values as shell code
+while IFS='=' read -r key value; do
+  # Skip comments and blank lines
+  [[ "${key}" =~ ^[[:space:]]*# ]] && continue
+  [[ -z "${key// }" ]] && continue
+  key="${key// }"
+  export "${key}=${value}"
+done < .env
 
 docker run --rm \
   -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \

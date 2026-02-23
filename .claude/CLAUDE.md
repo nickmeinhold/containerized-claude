@@ -24,21 +24,6 @@ Dockerized Claude Code agent that runs headlessly, polls an IMAP inbox, and repl
 - Emails are NOT marked as read during fetch — `mark-read` is called after successful processing to prevent message loss
 - Logs are truncated every 10 polls to prevent unbounded growth
 
-## Outstanding Review Issues
-
-These were identified in code review and should be addressed:
-
-### Blocking
-1. ~~**Prompt injection**~~ — **Mitigated** by `ALLOWED_SENDERS` allowlist (defense-in-depth). Both `fetch-mail.py` and `agent-loop.sh` independently reject emails from senders not in the allowlist. Fail-closed: if `ALLOWED_SENDERS` is empty/unset, all emails are rejected.
-2. **No `--max-turns`** — `MAX_TURNS` is in `.env.example` but never passed to `claude` invocations. No cost guardrail on runaway loops.
-
-### Non-blocking
-- `while read` loop runs in a subshell (piped from jq) — can't propagate state to outer loop
-- `tail -c 4000` may truncate mid-UTF-8 character; consider `tail -n 80` instead
-- `run-single.sh` sources `.env` as bash which could have edge cases
-- No `--max-turns` wired up yet
-- `claude-config/` is gitignored but referenced in Dockerfile COPY — fresh clones will fail to build without it
-
 ## Email Providers
 
 Gmail with App Passwords. SMTP via msmtp, IMAP via Python imaplib.
@@ -46,6 +31,7 @@ Gmail with App Passwords. SMTP via msmtp, IMAP via Python imaplib.
 ## Config
 
 All runtime config via environment variables in `.env`:
+
 - `AGENT_NAME` — resolves persona file: `persona-{name}.md` (lowercased)
 - `MY_EMAIL` — agent's email address
 - `PEER_EMAIL` — AI pen pal's email
@@ -54,3 +40,18 @@ All runtime config via environment variables in `.env`:
 - `ALLOWED_SENDERS` — comma-separated sender allowlist (fail-closed; enforced in both `fetch-mail.py` and `agent-loop.sh`)
 - `SEND_FIRST` — set `true` on one side only to start the conversation
 - `POLL_INTERVAL` — seconds between inbox checks
+
+## Outstanding Review Issues
+
+These were identified in code review and should be addressed:
+
+### Blocking
+1. ~~**Prompt injection**~~ — **Mitigated** by `ALLOWED_SENDERS` allowlist (defense-in-depth). Both `fetch-mail.py` and `agent-loop.sh` independently reject emails from senders not in the allowlist. Fail-closed: if `ALLOWED_SENDERS` is empty/unset, all emails are rejected.
+2. **No `--max-turns`** — `MAX_TURNS` is in `.env.example` but never passed to `claude` invocations. No cost guardrail on runaway loops.
+
+### Non-blocking (all resolved)
+- [x] `while read` subshell — replaced pipe with process substitution so variables propagate
+- [x] `tail -c 4000` UTF-8 truncation — replaced with `tail -n 80` (line-based)
+- [x] `run-single.sh` unsafe `source .env` — replaced with safe line-by-line reader
+- [x] `claude-config/` gitignored but Dockerfile COPYs it — now COPYs from `.claude/` (committed)
+- [x] `mark-read` wired up after successful Claude processing

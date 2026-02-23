@@ -174,8 +174,9 @@ while true; do
 
   log "Found ${MSG_COUNT} new message(s)!"
 
-  # Process each message
-  echo "${MAIL_JSON}" | jq -c '.messages[]' | while read -r MSG; do
+  # Process each message (process substitution keeps loop in current shell,
+  # so variables like MSG_UID propagate for the mark-read call)
+  while read -r MSG; do
     MSG_UID=$(echo "${MSG}" | jq -r '.uid')
     FROM=$(echo "${MSG}" | jq -r '.from')
     REPLY_TO=$(echo "${MSG}" | jq -r '.reply_to')
@@ -227,7 +228,7 @@ LOGENTRY
     # Load conversation history for context
     HISTORY=""
     if [[ -f "${CONVERSATION_LOG}" ]]; then
-      HISTORY=$(tail -c 4000 "${CONVERSATION_LOG}")
+      HISTORY=$(tail -n 80 "${CONVERSATION_LOG}")
     fi
 
     # Build the prompt for Claude
@@ -270,8 +271,12 @@ EOF
       --dangerously-skip-permissions \
       2>&1 | tee -a /workspace/logs/claude-output.log || true
 
+    # Mark the message as read now that it's been processed
+    mark-read "${MSG_UID}" 2>>/workspace/logs/fetch-mail-err.log \
+      || log "  WARNING: failed to mark UID ${MSG_UID} as read"
+
     log "Reply processed."
-  done
+  done < <(echo "${MAIL_JSON}" | jq -c '.messages[]')
 
   log "Done processing. Sleeping ${POLL_INTERVAL}s..."
   sleep "${POLL_INTERVAL}"
