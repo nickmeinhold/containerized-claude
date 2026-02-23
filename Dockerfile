@@ -37,6 +37,9 @@ RUN chmod 600 /etc/msmtprc && chown claudius:claudius /etc/msmtprc
 COPY fetch-mail.py /usr/local/bin/fetch-mail
 RUN chmod +x /usr/local/bin/fetch-mail
 
+COPY mark-read.py /usr/local/bin/mark-read
+RUN chmod +x /usr/local/bin/mark-read
+
 COPY agent-loop.sh /usr/local/bin/agent-loop
 RUN chmod +x /usr/local/bin/agent-loop
 

@@ -14,11 +14,26 @@ POLL_INTERVAL="${POLL_INTERVAL:-30}"
 CONVERSATION_LOG="/workspace/logs/conversation.log"
 CC_EMAIL="${CC_EMAIL:-}"
 OWNER_EMAIL="${OWNER_EMAIL:-}"
+ALLOWED_SENDERS="${ALLOWED_SENDERS:-}"
 
 # ── Helpers ──────────────────────────────────────────────────────
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"
+}
+
+# Truncate a log file if it exceeds a size limit (default 1MB)
+truncate_log() {
+  local file="$1"
+  local max_bytes="${2:-1048576}"
+  if [[ -f "${file}" ]]; then
+    local size
+    size=$(stat -c%s "${file}" 2>/dev/null || stat -f%z "${file}" 2>/dev/null || echo 0)
+    if [[ "${size}" -gt "${max_bytes}" ]]; then
+      log "Truncating ${file} (${size} bytes > ${max_bytes})"
+      tail -c "${max_bytes}" "${file}" > "${file}.tmp" && mv "${file}.tmp" "${file}"
+    fi
+  fi
 }
 
 check_required_vars() {
@@ -34,10 +49,10 @@ check_required_vars() {
   fi
 }
 
-# Build the Cc header line if CC_EMAIL is set
+# Build the Cc header fragment (with leading \n) or empty string
 cc_header() {
   if [[ -n "${CC_EMAIL}" ]]; then
-    echo "Cc: ${CC_EMAIL}"
+    echo "\nCc: ${CC_EMAIL}"
   fi
 }
 
@@ -86,7 +101,9 @@ fi
 
 # ── Send initial greeting if SEND_FIRST=true ─────────────────────
 
-if [[ "${SEND_FIRST:-false}" == "true" ]]; then
+GREETING_SENT="/workspace/logs/.greeting-sent"
+
+if [[ "${SEND_FIRST:-false}" == "true" && ! -f "${GREETING_SENT}" ]]; then
   log "SEND_FIRST=true — composing opening message..."
 
   FIRST_MSG_PROMPT="$(cat <<EOF
@@ -107,7 +124,7 @@ ${CC_INSTRUCTION}
 
 Send it using this exact command:
 
-printf 'Subject: Hello from ${AGENT_NAME}\nFrom: ${MY_EMAIL}\nTo: ${PEER_EMAIL}\n$(cc_header)\nContent-Type: text/plain; charset=utf-8\n\n%s' "\$(cat /tmp/reply.txt)" | sendmail -t
+printf 'Subject: Hello from ${AGENT_NAME}\nFrom: ${MY_EMAIL}\nTo: ${PEER_EMAIL}$(cc_header)\nContent-Type: text/plain; charset=utf-8\n\n%s' "\$(cat /tmp/reply.txt)" | sendmail -t
 
 First write your message to /tmp/reply.txt, then send it with the command above.
 Also append a summary to ${CONVERSATION_LOG} so you remember what you said.
@@ -119,6 +136,7 @@ EOF
     --dangerously-skip-permissions \
     2>&1 | tee -a /workspace/logs/claude-output.log || true
 
+  date > "${GREETING_SENT}"
   log "Opening message sent (or attempted). Entering poll loop."
 fi
 
@@ -130,8 +148,15 @@ while true; do
   LOOP_COUNT=$((LOOP_COUNT + 1))
   log "── Poll #${LOOP_COUNT} ──────────────────────────────────"
 
+  # Rotate logs every 10 polls
+  if (( LOOP_COUNT % 10 == 0 )); then
+    truncate_log "${CONVERSATION_LOG}" 1048576       # 1MB
+    truncate_log /workspace/logs/claude-output.log 1048576
+    truncate_log /workspace/logs/fetch-mail-err.log 524288  # 512KB
+  fi
+
   # Fetch unread emails from anyone
-  MAIL_JSON=$(fetch-mail 2>/dev/null || echo '{"count":0,"messages":[]}')
+  MAIL_JSON=$(fetch-mail 2>>/workspace/logs/fetch-mail-err.log || echo '{"count":0,"messages":[]}')
   MSG_COUNT=$(echo "${MAIL_JSON}" | jq -r '.count // 0')
 
   if [[ "${MSG_COUNT}" -eq 0 ]]; then
@@ -144,6 +169,7 @@ while true; do
 
   # Process each message
   echo "${MAIL_JSON}" | jq -c '.messages[]' | while read -r MSG; do
+    MSG_UID=$(echo "${MSG}" | jq -r '.uid')
     FROM=$(echo "${MSG}" | jq -r '.from')
     REPLY_TO=$(echo "${MSG}" | jq -r '.reply_to')
     SUBJECT=$(echo "${MSG}" | jq -r '.subject')
@@ -155,6 +181,29 @@ while true; do
     log "  Subject: ${SUBJECT}"
     log "  Date: ${DATE}"
     log "  Body preview: ${BODY:0:100}..."
+
+    # Sender allowlist — fail-closed: if unset/empty, skip all emails
+    if [[ -z "${ALLOWED_SENDERS}" ]]; then
+      log "  Skipping — ALLOWED_SENDERS is empty (fail-closed)."
+      continue
+    fi
+
+    # Check sender against allowlist (case-insensitive)
+    REPLY_TO_LOWER=$(echo "${REPLY_TO}" | tr '[:upper:]' '[:lower:]')
+    SENDER_ALLOWED=false
+    IFS=',' read -ra ALLOWED_ARRAY <<< "${ALLOWED_SENDERS}"
+    for ALLOWED in "${ALLOWED_ARRAY[@]}"; do
+      ALLOWED_TRIMMED=$(echo "${ALLOWED}" | tr '[:upper:]' '[:lower:]' | xargs)
+      if [[ "${REPLY_TO_LOWER}" == "${ALLOWED_TRIMMED}" ]]; then
+        SENDER_ALLOWED=true
+        break
+      fi
+    done
+
+    if [[ "${SENDER_ALLOWED}" != "true" ]]; then
+      log "  Skipping — sender ${REPLY_TO} not in allowlist."
+      continue
+    fi
 
     # Skip emails from ourselves
     if [[ "${REPLY_TO}" == "${MY_EMAIL}" ]]; then
@@ -209,7 +258,7 @@ ${CC_INSTRUCTION}
 To send your reply:
 1. Write your reply text to /tmp/reply.txt
 2. Send it with:
-   printf 'Subject: Re: ${SUBJECT}\nFrom: ${MY_EMAIL}\nTo: ${REPLY_TO}\n$(cc_header)\nContent-Type: text/plain; charset=utf-8\n\n%s' "\$(cat /tmp/reply.txt)" | sendmail -t
+   printf 'Subject: Re: ${SUBJECT}\nFrom: ${MY_EMAIL}\nTo: ${REPLY_TO}$(cc_header)\nContent-Type: text/plain; charset=utf-8\n\n%s' "\$(cat /tmp/reply.txt)" | sendmail -t
 3. Append a summary of your reply to ${CONVERSATION_LOG} with:
    echo -e "\n── SENT: \$(date) ──\nTo: ${REPLY_TO}\nSubject: Re: ${SUBJECT}\n\n\$(cat /tmp/reply.txt)\n──────────────────────" >> ${CONVERSATION_LOG}
 EOF
