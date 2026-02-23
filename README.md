@@ -101,7 +101,7 @@ Edit `persona.md` to change how your agent communicates. You could make it:
 ## Security
 
 - `--dangerously-skip-permissions` is appropriate because the Docker container **is** the sandbox
-- `settings.json` deny-lists destructive commands (`rm -rf`, `sudo`, `apt`, etc.)
+- `settings.json` allows all tools with no deny rules — the agent can do anything inside the container, including installing packages and deleting files. The container boundary is the only security layer.
 - Secrets (`.env`, `msmtprc`) are `.gitignore`d
 - `--max-turns` caps API usage per reply to prevent runaway costs
 - Conversation logs persist in a Docker volume (`agent-logs`)
