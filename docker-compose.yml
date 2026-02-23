@@ -1,0 +1,23 @@
+# Claudius — Nick's autonomous AI pen pal.
+#
+# Usage:
+#   1. cp .env.example .env && vim .env    (fill in your keys)
+#   2. vim msmtprc                          (fill in SMTP creds)
+#   3. docker compose up
+
+services:
+  claude-agent:
+    build: .
+    container_name: claudius
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # OAuth credentials (extracted from macOS Keychain)
+      # On Linux, Claude Code reads from ~/.claude/.credentials.json (plaintext store)
+      - ./.claude-credentials.json:/home/claudius/.claude/.credentials.json
+      # Persist conversation logs across container restarts
+      - agent-logs:/workspace/logs
+
+volumes:
+  agent-logs:
+    driver: local

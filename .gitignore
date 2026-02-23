@@ -1,0 +1,11 @@
+# Secrets — never commit these
+.env
+msmtprc
+.claude-credentials.json
+
+# Personal Claude config (baked into image at build time)
+claude-config/
+
+# Runtime artifacts
+workspace/
+agent-logs/
