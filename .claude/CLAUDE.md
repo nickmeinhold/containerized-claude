@@ -47,7 +47,7 @@ These were identified in code review and should be addressed:
 
 ### Blocking
 1. ~~**Prompt injection**~~ — **Mitigated** by `ALLOWED_SENDERS` allowlist (defense-in-depth). Both `fetch-mail.py` and `agent-loop.sh` independently reject emails from senders not in the allowlist. Fail-closed: if `ALLOWED_SENDERS` is empty/unset, all emails are rejected.
-2. **No `--max-turns`** — `MAX_TURNS` is in `.env.example` but never passed to `claude` invocations. No cost guardrail on runaway loops.
+2. ~~**No `--max-turns`**~~ — **Resolved.** Both Claude calls pass `--max-turns`, daily USD budget caps total spend via `--output-format json` cost tracking.
 
 ### Non-blocking (all resolved)
 - [x] `while read` subshell — replaced pipe with process substitution so variables propagate
@@ -55,3 +55,27 @@ These were identified in code review and should be addressed:
 - [x] `run-single.sh` unsafe `source .env` — replaced with safe line-by-line reader
 - [x] `claude-config/` gitignored but Dockerfile COPYs it — now COPYs from `.claude/` (committed)
 - [x] `mark-read` wired up after successful Claude processing
+
+## Cost Controls
+
+The agent tracks real dollar costs using `claude --output-format json`, which returns `total_cost_usd` and `num_turns` per invocation.
+
+### Environment Variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MAX_TURNS` | 25 | Max API round-trips per invocation |
+| `DAILY_BUDGET_USD` | 5.00 | Daily spend cap (0 = disabled) |
+| `BUDGET_RESET_HOUR_UTC` | 0 | Hour (0-23) when daily budget resets |
+| `MAX_RETRIES_PER_MESSAGE` | 2 | Retries per email before failing |
+| `ACTIVE_HOURS_UTC` | (empty) | Restrict to UTC hours, e.g. "06-22" |
+
+### State File
+
+Persisted at `/workspace/logs/agent-state.json` (Docker named volume). Tracks:
+- **budget** — daily cost/turns/invocations, auto-resets on date change
+- **current_task** — message UID, retry count, timestamps (null when idle)
+- **failed_tasks** — last 10 failures for debugging
+- **stats** — lifetime counters (total invocations, emails, cost)
+
+Corrupt state files are automatically backed up and reinitialized. Owner is notified via email when budget is exhausted (once per day) or when a task exceeds max retries.

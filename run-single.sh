@@ -35,4 +35,4 @@ docker run --rm \
   containerized-claude \
   -p "${PROMPT}" \
   --dangerously-skip-permissions \
-  --max-turns 20
+  --max-turns "${MAX_TURNS:-25}"
