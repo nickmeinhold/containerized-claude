@@ -16,6 +16,13 @@ CC_EMAIL="${CC_EMAIL:-}"
 OWNER_EMAIL="${OWNER_EMAIL:-}"
 ALLOWED_SENDERS="${ALLOWED_SENDERS:-}"
 
+MAX_TURNS="${MAX_TURNS:-25}"
+DAILY_BUDGET_USD="${DAILY_BUDGET_USD:-5.00}"
+BUDGET_RESET_HOUR_UTC="${BUDGET_RESET_HOUR_UTC:-0}"
+MAX_RETRIES_PER_MESSAGE="${MAX_RETRIES_PER_MESSAGE:-2}"
+ACTIVE_HOURS_UTC="${ACTIVE_HOURS_UTC:-}"
+STATE_FILE="/workspace/logs/agent-state.json"
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 log() {
@@ -34,6 +41,220 @@ truncate_log() {
       tail -c "${max_bytes}" "${file}" > "${file}.tmp" && mv "${file}.tmp" "${file}"
     fi
   fi
+}
+
+# ── State Management ────────────────────────────────────────────
+
+# Initialize state file if missing or corrupt. Called once at startup.
+init_state() {
+  if [[ -f "${STATE_FILE}" ]] && ! jq empty "${STATE_FILE}" 2>/dev/null; then
+    log "WARNING: State file corrupt. Backing up and reinitializing."
+    mv "${STATE_FILE}" "${STATE_FILE}.corrupt.$(date +%s)"
+  fi
+
+  if [[ ! -f "${STATE_FILE}" ]]; then
+    local now
+    now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    cat > "${STATE_FILE}" <<INITJSON
+{
+  "version": 1,
+  "budget": {
+    "date": "$(date -u '+%Y-%m-%d')",
+    "cost_usd": 0,
+    "turns_used": 0,
+    "invocations": 0,
+    "exhausted_notified": false
+  },
+  "current_task": null,
+  "failed_tasks": [],
+  "stats": {
+    "total_invocations": 0,
+    "total_emails_processed": 0,
+    "total_cost_usd": 0,
+    "last_reply_at": null,
+    "uptime_since": "${now}"
+  }
+}
+INITJSON
+    log "Initialized state file at ${STATE_FILE}"
+  fi
+}
+
+# Read a value from the state file using a jq path.
+# Usage: state_get '.budget.cost_usd'
+state_get() {
+  jq -r "$1" "${STATE_FILE}"
+}
+
+# Atomically update the state file using a jq filter.
+# Usage: state_update '.budget.cost_usd += 0.12'
+state_update() {
+  local tmp="${STATE_FILE}.tmp"
+  jq "$1" "${STATE_FILE}" > "${tmp}" && mv "${tmp}" "${STATE_FILE}"
+}
+
+# Reset daily budget counters if the UTC date has changed and we've
+# passed the configured reset hour (BUDGET_RESET_HOUR_UTC).
+check_budget_reset() {
+  local today now_hour
+  today=$(date -u '+%Y-%m-%d')
+  now_hour=$(date -u '+%-H')
+  local state_date
+  state_date=$(state_get '.budget.date')
+
+  if [[ "${state_date}" != "${today}" && "${now_hour}" -ge "${BUDGET_RESET_HOUR_UTC}" ]]; then
+    log "New budget period (${today}, reset hour ${BUDGET_RESET_HOUR_UTC}). Resetting daily counters."
+    state_update "
+      .budget.date = \"${today}\" |
+      .budget.cost_usd = 0 |
+      .budget.turns_used = 0 |
+      .budget.invocations = 0 |
+      .budget.exhausted_notified = false
+    "
+  fi
+}
+
+# Return 0 (true) if daily budget has not been exhausted.
+# Budget enforcement is disabled when DAILY_BUDGET_USD=0.
+has_budget() {
+  if [[ $(echo "${DAILY_BUDGET_USD} == 0" | bc -l) -eq 1 ]]; then
+    return 0  # budget enforcement disabled
+  fi
+  local spent
+  spent=$(state_get '.budget.cost_usd')
+  # bc returns 1 when the comparison is true
+  [[ $(echo "${spent} < ${DAILY_BUDGET_USD}" | bc -l) -eq 1 ]]
+}
+
+# Record actual cost and turns from a Claude JSON response.
+# Usage: charge_budget <cost_usd> <turns>
+charge_budget() {
+  local cost="${1:-0}"
+  local turns="${2:-0}"
+  state_update "
+    .budget.cost_usd += ${cost} |
+    .budget.turns_used += ${turns} |
+    .budget.invocations += 1 |
+    .stats.total_invocations += 1 |
+    .stats.total_cost_usd += ${cost}
+  "
+}
+
+# Check if the current UTC hour falls within ACTIVE_HOURS_UTC.
+# Returns 0 (true) if active, 1 if outside hours.
+# Supports wrap-around ranges like "22-06".
+is_active_hours() {
+  if [[ -z "${ACTIVE_HOURS_UTC}" ]]; then
+    return 0  # always active when unset
+  fi
+
+  local start end now_hour
+  start="${ACTIVE_HOURS_UTC%%-*}"
+  end="${ACTIVE_HOURS_UTC##*-}"
+  now_hour=$(date -u '+%-H')
+
+  # Remove leading zeros for arithmetic
+  start=$((10#${start}))
+  end=$((10#${end}))
+
+  if [[ "${start}" -le "${end}" ]]; then
+    # Normal range: e.g. 06-22
+    [[ "${now_hour}" -ge "${start}" && "${now_hour}" -lt "${end}" ]]
+  else
+    # Wrap-around range: e.g. 22-06 (active from 22:00 to 05:59)
+    [[ "${now_hour}" -ge "${start}" || "${now_hour}" -lt "${end}" ]]
+  fi
+}
+
+# Set or update current_task. If the UID matches, increments retry count.
+# Usage: set_current_task <uid> <from> <subject>
+set_current_task() {
+  local uid="$1" from="$2" subject="$3"
+  local now
+  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+  local existing_uid
+  existing_uid=$(state_get '.current_task.message_uid // empty')
+
+  if [[ "${existing_uid}" == "${uid}" ]]; then
+    # Same task — increment retry counter
+    state_update '.current_task.retries += 1'
+  else
+    # New task
+    state_update "
+      .current_task = {
+        \"message_uid\": \"${uid}\",
+        \"from\": \"${from}\",
+        \"subject\": $(echo "${subject}" | jq -Rs .),
+        \"retries\": 0,
+        \"first_attempt_at\": \"${now}\"
+      }
+    "
+  fi
+}
+
+# Clear current_task and bump success stats.
+complete_current_task() {
+  local now
+  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  state_update "
+    .current_task = null |
+    .stats.total_emails_processed += 1 |
+    .stats.last_reply_at = \"${now}\"
+  "
+}
+
+# Move current_task to failed_tasks (capped at 10), clear current_task.
+# Usage: fail_current_task <reason>
+fail_current_task() {
+  local reason="$1"
+  local now
+  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  state_update "
+    .failed_tasks = (([.current_task + {\"failed_at\": \"${now}\", \"reason\": \"${reason}\"}] + .failed_tasks) | .[0:10]) |
+    .current_task = null
+  "
+}
+
+# Return the retry count for a given UID (0 if no matching current_task).
+# Usage: retries=$(get_task_retries "4521")
+get_task_retries() {
+  local uid="$1"
+  local current_uid
+  current_uid=$(state_get '.current_task.message_uid // empty')
+  if [[ "${current_uid}" == "${uid}" ]]; then
+    state_get '.current_task.retries'
+  else
+    echo "0"
+  fi
+}
+
+# Send an email notification to the owner.
+# Usage: notify_owner "Subject line" "Body text"
+notify_owner() {
+  local subject="$1" body="$2"
+  if [[ -z "${OWNER_EMAIL}" ]]; then
+    log "WARNING: Cannot notify owner — OWNER_EMAIL not set."
+    return 0
+  fi
+  printf 'Subject: [%s] %s\nFrom: %s\nTo: %s\nContent-Type: text/plain; charset=utf-8\n\n%s' \
+    "${AGENT_NAME}" "${subject}" "${MY_EMAIL}" "${OWNER_EMAIL}" "${body}" \
+    | sendmail -t 2>>/workspace/logs/claude-output.log || log "WARNING: Failed to send owner notification."
+}
+
+# Send a one-per-day notification when budget is exhausted.
+notify_budget_exhausted() {
+  local already_notified
+  already_notified=$(state_get '.budget.exhausted_notified')
+  if [[ "${already_notified}" == "true" ]]; then
+    return 0
+  fi
+
+  local spent
+  spent=$(state_get '.budget.cost_usd')
+  notify_owner "Daily budget exhausted" \
+    "Spent \$${spent} of \$${DAILY_BUDGET_USD} daily budget. Agent paused until budget resets at ${BUDGET_RESET_HOUR_UTC}:00 UTC."
+  state_update '.budget.exhausted_notified = true'
 }
 
 check_required_vars() {
@@ -75,9 +296,14 @@ log "  Owner:      ${OWNER_EMAIL:-not set}"
 log "  CC email:   ${CC_EMAIL:-none}"
 log "  IMAP host:  ${IMAP_HOST}"
 log "  Poll every: ${POLL_INTERVAL}s"
+log "  Max turns:    ${MAX_TURNS}/invocation"
+log "  Daily budget: \$${DAILY_BUDGET_USD}"
+log "  Active hours: ${ACTIVE_HOURS_UTC:-always}"
 log ""
 
 mkdir -p /workspace/logs
+init_state
+check_budget_reset
 
 # Resolve the persona file based on AGENT_NAME
 AGENT_NAME_LOWER=$(echo "${AGENT_NAME}" | tr '[:upper:]' '[:lower:]')
@@ -113,8 +339,18 @@ GREETING_SENT="/workspace/logs/.greeting-sent"
 if [[ "${SEND_FIRST:-false}" == "true" && ! -f "${GREETING_SENT}" ]]; then
   log "SEND_FIRST=true — composing opening message..."
 
+  BUDGET_REMAINING=$(echo "${DAILY_BUDGET_USD} - $(state_get '.budget.cost_usd')" | bc)
+  BUDGET_CONTEXT="=== OPERATIONAL CONTEXT ===
+Turns this invocation: max ${MAX_TURNS}
+Daily budget remaining: ~\$${BUDGET_REMAINING}
+If working on a complex task, prioritize completing it over verbose explanations.
+If you can't finish within your turn limit, say so — you'll get another invocation.
+=== END OPERATIONAL CONTEXT ==="
+
   FIRST_MSG_PROMPT="$(cat <<EOF
 ${PERSONA}
+
+${BUDGET_CONTEXT}
 
 You are starting a brand new email conversation. Your email address is ${MY_EMAIL}
 and you're writing to your pen pal at ${PEER_EMAIL}.
@@ -139,12 +375,23 @@ EOF
 )"
 
   log "Running Claude for opening message..."
-  claude -p "${FIRST_MSG_PROMPT}" \
+  CLAUDE_OUTPUT=$(claude -p "${FIRST_MSG_PROMPT}" \
+    --max-turns "${MAX_TURNS}" \
+    --output-format json \
     --dangerously-skip-permissions \
-    2>&1 | tee -a /workspace/logs/claude-output.log || true
+    2>>/workspace/logs/claude-output.log) || CLAUDE_OUTPUT="{}"
+
+  # Parse actual cost and turns from JSON response
+  TURNS_USED=$(echo "${CLAUDE_OUTPUT}" | jq -r '.num_turns // 0')
+  COST_USD=$(echo "${CLAUDE_OUTPUT}" | jq -r '.total_cost_usd // 0')
+
+  # Log the result text
+  echo "${CLAUDE_OUTPUT}" | jq -r '.result // empty' >> /workspace/logs/claude-output.log
+
+  charge_budget "${COST_USD}" "${TURNS_USED}"
 
   date > "${GREETING_SENT}"
-  log "Opening message sent (or attempted). Entering poll loop."
+  log "Opening message sent (or attempted). Cost: \$${COST_USD}, turns: ${TURNS_USED}. Entering poll loop."
 fi
 
 # ── Main Loop ────────────────────────────────────────────────────
@@ -160,6 +407,19 @@ while true; do
     truncate_log "${CONVERSATION_LOG}" 1048576       # 1MB
     truncate_log /workspace/logs/claude-output.log 1048576
     truncate_log /workspace/logs/fetch-mail-err.log 524288  # 512KB
+  fi
+
+  check_budget_reset
+
+  if ! is_active_hours; then
+    log "Outside active hours (${ACTIVE_HOURS_UTC}). Sleeping..."
+    sleep "${POLL_INTERVAL}"; continue
+  fi
+
+  if ! has_budget; then
+    log "Daily budget exhausted (\$$(state_get '.budget.cost_usd')/\$${DAILY_BUDGET_USD})."
+    notify_budget_exhausted
+    sleep "${POLL_INTERVAL}"; continue
   fi
 
   # Fetch unread emails from anyone
@@ -213,6 +473,25 @@ while true; do
       continue
     fi
 
+    # Check retry count
+    retries=$(get_task_retries "${MSG_UID}")
+    if [[ "${retries}" -ge "${MAX_RETRIES_PER_MESSAGE}" ]]; then
+      log "  Skipping UID ${MSG_UID} — max retries (${MAX_RETRIES_PER_MESSAGE}) exceeded."
+      fail_current_task "max_retries_exceeded"
+      notify_owner "Task failed" "Could not process after ${MAX_RETRIES_PER_MESSAGE} retries: ${SUBJECT} from ${FROM}"
+      mark-read "${MSG_UID}" 2>>/workspace/logs/fetch-mail-err.log || true
+      continue
+    fi
+
+    # Check budget before each invocation
+    if ! has_budget; then
+      log "  Budget exhausted mid-batch. Skipping remaining."
+      notify_budget_exhausted
+      break  # exit inner loop; outer loop sleeps
+    fi
+
+    set_current_task "${MSG_UID}" "${REPLY_TO}" "${SUBJECT}"
+
     # Log the incoming message
     cat >> "${CONVERSATION_LOG}" <<LOGENTRY
 
@@ -231,9 +510,20 @@ LOGENTRY
       HISTORY=$(tail -n 80 "${CONVERSATION_LOG}")
     fi
 
+    # Build budget context for Claude
+    BUDGET_REMAINING=$(echo "${DAILY_BUDGET_USD} - $(state_get '.budget.cost_usd')" | bc)
+    BUDGET_CONTEXT="=== OPERATIONAL CONTEXT ===
+Turns this invocation: max ${MAX_TURNS}
+Daily budget remaining: ~\$${BUDGET_REMAINING}
+If working on a complex task, prioritize completing it over verbose explanations.
+If you can't finish within your turn limit, say so — you'll get another invocation.
+=== END OPERATIONAL CONTEXT ==="
+
     # Build the prompt for Claude
     REPLY_PROMPT="$(cat <<EOF
 ${PERSONA}
+
+${BUDGET_CONTEXT}
 
 You are ${AGENT_NAME} (${MY_EMAIL}).
 
@@ -267,15 +557,32 @@ EOF
 )"
 
     log "Running Claude to compose reply..."
-    claude -p "${REPLY_PROMPT}" \
+    CLAUDE_OUTPUT=$(claude -p "${REPLY_PROMPT}" \
+      --max-turns "${MAX_TURNS}" \
+      --output-format json \
       --dangerously-skip-permissions \
-      2>&1 | tee -a /workspace/logs/claude-output.log || true
+      2>>/workspace/logs/claude-output.log) || CLAUDE_OUTPUT="{}"
+    CLAUDE_EXIT=$?
 
-    # Mark the message as read now that it's been processed
-    mark-read "${MSG_UID}" 2>>/workspace/logs/fetch-mail-err.log \
-      || log "  WARNING: failed to mark UID ${MSG_UID} as read"
+    # Parse actual cost and turns from JSON response
+    TURNS_USED=$(echo "${CLAUDE_OUTPUT}" | jq -r '.num_turns // 0')
+    COST_USD=$(echo "${CLAUDE_OUTPUT}" | jq -r '.total_cost_usd // 0')
+    IS_ERROR=$(echo "${CLAUDE_OUTPUT}" | jq -r '.is_error // false')
 
-    log "Reply processed."
+    # Log the result text
+    echo "${CLAUDE_OUTPUT}" | jq -r '.result // empty' >> /workspace/logs/claude-output.log
+
+    charge_budget "${COST_USD}" "${TURNS_USED}"
+
+    if [[ "${CLAUDE_EXIT}" -eq 0 && "${IS_ERROR}" == "false" ]]; then
+      complete_current_task
+      # Mark the message as read now that it's been processed
+      mark-read "${MSG_UID}" 2>>/workspace/logs/fetch-mail-err.log \
+        || log "  WARNING: failed to mark UID ${MSG_UID} as read"
+      log "Reply processed. Cost: \$${COST_USD}, turns: ${TURNS_USED}."
+    else
+      log "  WARNING: Claude invocation failed (exit=${CLAUDE_EXIT}, is_error=${IS_ERROR}). Will retry next poll."
+    fi
   done < <(echo "${MAIL_JSON}" | jq -c '.messages[]')
 
   log "Done processing. Sleeping ${POLL_INTERVAL}s..."
