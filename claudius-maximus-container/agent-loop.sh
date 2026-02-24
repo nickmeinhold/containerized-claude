@@ -23,6 +23,8 @@ MAX_RETRIES_PER_MESSAGE="${MAX_RETRIES_PER_MESSAGE:-2}"
 ACTIVE_HOURS_UTC="${ACTIVE_HOURS_UTC:-}"
 REPORT_EVERY_N="${REPORT_EVERY_N:-10}"
 STATE_FILE="/workspace/logs/agent-state.json"
+JOURNAL_REPO="${JOURNAL_REPO:-gaylejewon/research-journal}"
+JOURNAL_DIR="/workspace/repos/${JOURNAL_REPO}"
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -456,8 +458,7 @@ cc_header() {
 # Load the research journal INDEX.md for prompt injection.
 # Returns empty string if journal doesn't exist yet (graceful degradation).
 load_journal_index() {
-  local repo="${JOURNAL_REPO:-gaylejewon/research-journal}"
-  local index="/workspace/repos/${repo}/INDEX.md"
+  local index="${JOURNAL_DIR}/INDEX.md"
   if [[ ! -f "${index}" ]]; then
     return
   fi
@@ -473,7 +474,7 @@ load_journal_index() {
   cat <<JRNL
 === YOUR RESEARCH JOURNAL ===
 This is your persistent memory — updated entries survive across invocations.
-Repo: /workspace/repos/${repo}
+Repo: ${JOURNAL_DIR}
 
 ${content}${truncation_note}
 === END RESEARCH JOURNAL ===
@@ -623,8 +624,6 @@ while true; do
     truncate_log /workspace/logs/fetch-mail-err.log 524288  # 512KB
 
     # Pull latest journal from remote
-    JOURNAL_REPO_VAR="${JOURNAL_REPO:-gaylejewon/research-journal}"
-    JOURNAL_DIR="/workspace/repos/${JOURNAL_REPO_VAR}"
     if [[ -d "${JOURNAL_DIR}/.git" ]]; then
       git -C "${JOURNAL_DIR}" pull --ff-only 2>/dev/null || true
     fi
