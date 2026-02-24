@@ -13,13 +13,18 @@ services:
     env_file: .env
     volumes:
       # OAuth credentials (extracted from macOS Keychain)
+      # Mounted read-write so Claude Code can persist refreshed tokens
       # On Linux, Claude Code reads from ~/.claude/.credentials.json (plaintext store)
-      - ./.claude-credentials.json:/home/claudius/.claude/.credentials.json:ro
+      - ./.claude-credentials.json:/home/claudius/.claude/.credentials.json
       # SMTP credentials — mounted at runtime to keep out of image layers
       - ./msmtprc:/etc/msmtprc:ro
       # Persist conversation logs across container restarts
       - agent-logs:/workspace/logs
+      # Persist cloned repos across container restarts
+      - agent-repos:/workspace/repos
 
 volumes:
   agent-logs:
+    driver: local
+  agent-repos:
     driver: local

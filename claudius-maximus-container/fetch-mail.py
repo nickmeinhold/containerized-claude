@@ -100,7 +100,7 @@ def main():
         messages = []
 
         for uid in uids:
-            _, msg_data = conn.uid("fetch", uid, "(RFC822)")
+            _, msg_data = conn.uid("fetch", uid, "(BODY.PEEK[])")
             raw = msg_data[0][1]
             msg = email.message_from_bytes(raw)
 
