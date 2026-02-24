@@ -20,6 +20,11 @@ MAX_TURNS="${MAX_TURNS:-25}"
 WEEKLY_TURN_QUOTA="${WEEKLY_TURN_QUOTA:-1000}"
 QUOTA_RESET_DAY="${QUOTA_RESET_DAY:-4}"          # ISO weekday: 1=Mon..7=Sun (4=Thu)
 QUOTA_RESET_HOUR_UTC="${QUOTA_RESET_HOUR_UTC:-6}" # 06:00 UTC
+# Validate QUOTA_RESET_DAY range (must be ISO weekday 1-7)
+if [[ "${QUOTA_RESET_DAY}" -lt 1 || "${QUOTA_RESET_DAY}" -gt 7 ]]; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: QUOTA_RESET_DAY must be 1-7 (got ${QUOTA_RESET_DAY}), defaulting to 4 (Thursday)"
+  QUOTA_RESET_DAY=4
+fi
 MAX_RETRIES_PER_MESSAGE="${MAX_RETRIES_PER_MESSAGE:-2}"
 ACTIVE_HOURS_UTC="${ACTIVE_HOURS_UTC:-}"
 REPORT_EVERY_N="${REPORT_EVERY_N:-10}"
@@ -162,6 +167,8 @@ state_get() {
 }
 
 # Atomically update the state file using a jq filter.
+# NOTE: No file locking — assumes single agent instance per container.
+# If concurrent instances are ever needed, wrap with flock(1).
 # Usage: state_update '.budget.cost_usd += 0.12'
 state_update() {
   local tmp="${STATE_FILE}.tmp"
@@ -196,7 +203,7 @@ check_daily_reset() {
 # (i.e., we've crossed the next reset boundary since it was set).
 check_weekly_reset() {
   if [[ "${WEEKLY_TURN_QUOTA}" -eq 0 ]]; then
-    return 0  # quota enforcement disabled
+    return 0  # 0 = enforcement disabled (unlimited turns), not "zero turns"
   fi
 
   local period_start now_epoch period_start_epoch next_reset
@@ -212,7 +219,17 @@ check_weekly_reset() {
   fi
 
   # Convert period_start to epoch. The next reset after that period_start is +7 days.
-  period_start_epoch=$(date -u -d "${period_start}" +%s 2>/dev/null || echo 0)
+  # IMPORTANT: Do NOT fall back to epoch 0 on parse failure — that would make
+  # next_reset = Jan 8, 1970, always in the past, triggering a reset every call
+  # and silently defeating the entire quota system.
+  period_start_epoch=$(date -u -d "${period_start}" +%s 2>/dev/null)
+  if [[ -z "${period_start_epoch}" || "${period_start_epoch}" -le 0 ]]; then
+    log "WARNING: corrupt period_start '${period_start}', recalculating."
+    local new_start
+    new_start=$(calculate_period_start)
+    state_update ".weekly.period_start = \"${new_start}\""
+    return 0  # preserve existing counters — don't reset on corrupt data
+  fi
   next_reset=$(( period_start_epoch + 7 * 86400 ))
 
   if [[ "${now_epoch}" -ge "${next_reset}" ]]; then
@@ -328,13 +345,31 @@ calculate_period_start() {
   date -u -d "@${period_start_epoch}" '+%Y-%m-%dT%H:%M:%SZ'
 }
 
+# Build the OPERATIONAL CONTEXT block injected into Claude's prompt.
+# Sets BUDGET_CONTEXT in the caller's scope (no subshell).
+build_budget_context() {
+  WEEKLY_USED=$(state_get '.weekly.turns_used // 0')
+  WEEKLY_REMAINING=$(( WEEKLY_TURN_QUOTA - WEEKLY_USED ))
+  if [[ "${WEEKLY_REMAINING}" -lt 0 ]]; then WEEKLY_REMAINING=0; fi
+  DAILY_USED=$(state_get '.budget.turns_used // 0')
+  DAILY_ALLOW=$(calculate_daily_allowance)
+  DAYS_LEFT=$(calculate_days_until_reset)
+  BUDGET_CONTEXT="=== OPERATIONAL CONTEXT ===
+Turns this invocation: max ${MAX_TURNS}
+Weekly quota: ${WEEKLY_USED}/${WEEKLY_TURN_QUOTA} turns (${WEEKLY_REMAINING} remaining)
+Today's pace: ${DAILY_USED}/${DAILY_ALLOW} turns (auto-paced over ${DAYS_LEFT} days)
+If working on a complex task, prioritize completing it over verbose explanations.
+If you can't finish within your turn limit, say so — you'll get another invocation.
+=== END OPERATIONAL CONTEXT ==="
+}
+
 # Return 0 (true) if the agent has turns remaining (two-level check).
 # HARD STOP: weekly turns exhausted → pause until weekly reset.
 # SOFT STOP: today's turns >= daily allowance → pause until tomorrow.
 # Quota enforcement is disabled when WEEKLY_TURN_QUOTA=0.
 has_turns() {
   if [[ "${WEEKLY_TURN_QUOTA}" -eq 0 ]]; then
-    return 0  # quota enforcement disabled
+    return 0  # 0 = enforcement disabled (unlimited turns), not "zero turns"
   fi
 
   # HARD STOP: weekly quota exhausted
@@ -729,19 +764,7 @@ GREETING_SENT="/workspace/logs/.greeting-sent"
 if [[ "${SEND_FIRST:-false}" == "true" && ! -f "${GREETING_SENT}" ]]; then
   log "SEND_FIRST=true — composing opening message..."
 
-  WEEKLY_USED=$(state_get '.weekly.turns_used // 0')
-  WEEKLY_REMAINING=$(( WEEKLY_TURN_QUOTA - WEEKLY_USED ))
-  if [[ "${WEEKLY_REMAINING}" -lt 0 ]]; then WEEKLY_REMAINING=0; fi
-  DAILY_USED=$(state_get '.budget.turns_used // 0')
-  DAILY_ALLOW=$(calculate_daily_allowance)
-  DAYS_LEFT=$(calculate_days_until_reset)
-  BUDGET_CONTEXT="=== OPERATIONAL CONTEXT ===
-Turns this invocation: max ${MAX_TURNS}
-Weekly quota: ${WEEKLY_USED}/${WEEKLY_TURN_QUOTA} turns (${WEEKLY_REMAINING} remaining)
-Today's pace: ${DAILY_USED}/${DAILY_ALLOW} turns (auto-paced over ${DAYS_LEFT} days)
-If working on a complex task, prioritize completing it over verbose explanations.
-If you can't finish within your turn limit, say so — you'll get another invocation.
-=== END OPERATIONAL CONTEXT ==="
+  build_budget_context
 
   FIRST_MSG_PROMPT="$(cat <<EOF
 ${PERSONA}
@@ -930,19 +953,7 @@ LOGENTRY
     fi
 
     # Build turn-based quota context for Claude
-    WEEKLY_USED=$(state_get '.weekly.turns_used // 0')
-    WEEKLY_REMAINING=$(( WEEKLY_TURN_QUOTA - WEEKLY_USED ))
-    if [[ "${WEEKLY_REMAINING}" -lt 0 ]]; then WEEKLY_REMAINING=0; fi
-    DAILY_USED=$(state_get '.budget.turns_used // 0')
-    DAILY_ALLOW=$(calculate_daily_allowance)
-    DAYS_LEFT=$(calculate_days_until_reset)
-    BUDGET_CONTEXT="=== OPERATIONAL CONTEXT ===
-Turns this invocation: max ${MAX_TURNS}
-Weekly quota: ${WEEKLY_USED}/${WEEKLY_TURN_QUOTA} turns (${WEEKLY_REMAINING} remaining)
-Today's pace: ${DAILY_USED}/${DAILY_ALLOW} turns (auto-paced over ${DAYS_LEFT} days)
-If working on a complex task, prioritize completing it over verbose explanations.
-If you can't finish within your turn limit, say so — you'll get another invocation.
-=== END OPERATIONAL CONTEXT ==="
+    build_budget_context
 
     # Build the prompt for Claude
     REPLY_PROMPT="$(cat <<EOF
