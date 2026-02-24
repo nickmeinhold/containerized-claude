@@ -6,6 +6,7 @@ FROM node:20-slim
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    bc \
     curl \
     jq \
     msmtp \
@@ -31,8 +32,9 @@ COPY CLAUDE.md /home/claudius/.claude/CLAUDE.md
 
 # Copy application files
 COPY settings.json /home/claudius/.claude/settings.json
-COPY msmtprc /etc/msmtprc
-RUN chmod 600 /etc/msmtprc && chown claudius:claudius /etc/msmtprc
+# msmtprc is mounted at runtime via docker-compose.yml to keep SMTP
+# credentials out of image layers (see docker-compose.yml volumes)
+RUN touch /etc/msmtprc && chmod 600 /etc/msmtprc && chown claudius:claudius /etc/msmtprc
 
 COPY fetch-mail.py /usr/local/bin/fetch-mail
 RUN chmod +x /usr/local/bin/fetch-mail

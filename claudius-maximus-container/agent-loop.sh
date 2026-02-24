@@ -277,10 +277,10 @@ check_required_vars() {
   fi
 }
 
-# Build the Cc header fragment (with leading \n) or empty string
+# Build the Cc header fragment (with leading newline) or empty string
 cc_header() {
   if [[ -n "${CC_EMAIL}" ]]; then
-    echo "\nCc: ${CC_EMAIL}"
+    printf '\nCc: %s' "${CC_EMAIL}"
   fi
 }
 
@@ -375,11 +375,13 @@ EOF
 )"
 
   log "Running Claude for opening message..."
+  CLAUDE_EXIT=0
   CLAUDE_OUTPUT=$(claude -p "${FIRST_MSG_PROMPT}" \
     --max-turns "${MAX_TURNS}" \
     --output-format json \
     --dangerously-skip-permissions \
-    2>>/workspace/logs/claude-output.log) || CLAUDE_OUTPUT="{}"
+    2>>/workspace/logs/claude-output.log) || CLAUDE_EXIT=$?
+  if [[ -z "${CLAUDE_OUTPUT}" ]]; then CLAUDE_OUTPUT="{}"; fi
 
   # Parse actual cost and turns from JSON response
   TURNS_USED=$(echo "${CLAUDE_OUTPUT}" | jq -r '.num_turns // 0')
@@ -441,6 +443,8 @@ while true; do
     FROM=$(echo "${MSG}" | jq -r '.from')
     REPLY_TO=$(echo "${MSG}" | jq -r '.reply_to')
     SUBJECT=$(echo "${MSG}" | jq -r '.subject')
+    # Sanitize subject: strip newlines/carriage returns to prevent email header injection
+    SUBJECT=$(tr -d '\n\r' <<< "${SUBJECT}")
     DATE=$(echo "${MSG}" | jq -r '.date')
     BODY=$(echo "${MSG}" | jq -r '.body')
 
@@ -557,12 +561,13 @@ EOF
 )"
 
     log "Running Claude to compose reply..."
+    CLAUDE_EXIT=0
     CLAUDE_OUTPUT=$(claude -p "${REPLY_PROMPT}" \
       --max-turns "${MAX_TURNS}" \
       --output-format json \
       --dangerously-skip-permissions \
-      2>>/workspace/logs/claude-output.log) || CLAUDE_OUTPUT="{}"
-    CLAUDE_EXIT=$?
+      2>>/workspace/logs/claude-output.log) || CLAUDE_EXIT=$?
+    if [[ -z "${CLAUDE_OUTPUT}" ]]; then CLAUDE_OUTPUT="{}"; fi
 
     # Parse actual cost and turns from JSON response
     TURNS_USED=$(echo "${CLAUDE_OUTPUT}" | jq -r '.num_turns // 0')
