@@ -10,6 +10,19 @@ Dockerized Claude Code agent that runs headlessly, polls an IMAP inbox, and repl
 - `entrypoint.sh` — verifies credentials, hands off to agent-loop
 - `persona-claudius.md` — agent personality file
 
+## Running
+
+All `docker compose` commands must be run from this directory (`claudius-maximus-container/`), since this is where `docker-compose.yml` and the Dockerfile build context live.
+
+```bash
+cd claudius-maximus-container
+docker compose up          # start (foreground)
+docker compose up -d       # start (detached)
+docker compose up --build  # rebuild and start
+docker compose logs -f     # tail logs
+docker compose down        # stop
+```
+
 ## Auth
 
 - OAuth credentials extracted from macOS Keychain → mounted at `~/.claude/.credentials.json` in the Linux container (plaintext credential store)
