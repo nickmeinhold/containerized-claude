@@ -93,15 +93,17 @@ state_update() {
   jq "$1" "${STATE_FILE}" > "${tmp}" && mv "${tmp}" "${STATE_FILE}"
 }
 
-# Reset daily budget counters if the UTC date has changed.
+# Reset daily budget counters if the UTC date has changed and we've
+# passed the configured reset hour (BUDGET_RESET_HOUR_UTC).
 check_budget_reset() {
-  local today
+  local today now_hour
   today=$(date -u '+%Y-%m-%d')
+  now_hour=$(date -u '+%-H')
   local state_date
   state_date=$(state_get '.budget.date')
 
-  if [[ "${state_date}" != "${today}" ]]; then
-    log "New day (${today}). Resetting daily budget counters."
+  if [[ "${state_date}" != "${today}" && "${now_hour}" -ge "${BUDGET_RESET_HOUR_UTC}" ]]; then
+    log "New budget period (${today}, reset hour ${BUDGET_RESET_HOUR_UTC}). Resetting daily counters."
     state_update "
       .budget.date = \"${today}\" |
       .budget.cost_usd = 0 |
@@ -115,7 +117,7 @@ check_budget_reset() {
 # Return 0 (true) if daily budget has not been exhausted.
 # Budget enforcement is disabled when DAILY_BUDGET_USD=0.
 has_budget() {
-  if [[ "${DAILY_BUDGET_USD}" == "0" || "${DAILY_BUDGET_USD}" == "0.00" ]]; then
+  if [[ $(echo "${DAILY_BUDGET_USD} == 0" | bc -l) -eq 1 ]]; then
     return 0  # budget enforcement disabled
   fi
   local spent
@@ -559,7 +561,7 @@ EOF
       --max-turns "${MAX_TURNS}" \
       --output-format json \
       --dangerously-skip-permissions \
-      2>>/workspace/logs/claude-output.log)
+      2>>/workspace/logs/claude-output.log) || CLAUDE_OUTPUT="{}"
     CLAUDE_EXIT=$?
 
     # Parse actual cost and turns from JSON response
