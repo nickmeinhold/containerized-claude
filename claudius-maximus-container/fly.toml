@@ -10,6 +10,7 @@
 #   fly logs                           (tail logs)
 #   fly ssh console                    (shell into the machine)
 
+# Placeholder — `fly launch` will prompt for a unique name and update this.
 app = "claudius-maximus"
 primary_region = "iad"
 

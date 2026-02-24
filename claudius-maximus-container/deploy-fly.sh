@@ -26,25 +26,23 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
-# ── Read .env into an associative array ───────────────────────────
-declare -A env_vars
-while IFS= read -r line; do
-  # Skip blank lines and comments
-  [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
-  key="${line%%=*}"
-  value="${line#*=}"
-  env_vars["${key}"]="${value}"
-done < .env
+# ── Build secrets payload ─────────────────────────────────────────
+# Pipe KEY=VALUE lines to `fly secrets import` (bash 3 compatible).
+SECRETS_FILE=$(mktemp)
+trap 'rm -f "${SECRETS_FILE}"' EXIT
 
-# ── Add SMTP vars (generate msmtprc from env on the server) ──────
-# Default to Gmail settings matching the existing msmtprc
-env_vars["SMTP_HOST"]="${env_vars[SMTP_HOST]:-smtp.gmail.com}"
-env_vars["SMTP_PORT"]="${env_vars[SMTP_PORT]:-587}"
+# Start with .env (strip comments and blank lines)
+grep -v '^\s*#' .env | grep -v '^\s*$' > "${SECRETS_FILE}"
+
+# Add SMTP defaults if not already in .env (generates msmtprc on server)
+grep -q '^SMTP_HOST=' "${SECRETS_FILE}" || echo "SMTP_HOST=smtp.gmail.com" >> "${SECRETS_FILE}"
+grep -q '^SMTP_PORT=' "${SECRETS_FILE}" || echo "SMTP_PORT=587" >> "${SECRETS_FILE}"
 # SMTP_USER and SMTP_PASS default to MY_EMAIL and IMAP_PASS in entrypoint
 
-# ── Add Claude credentials JSON ──────────────────────────────────
+# Add Claude credentials JSON
 if [[ -f .claude-credentials.json ]]; then
-  env_vars["CLAUDE_CREDENTIALS_JSON"]="$(cat .claude-credentials.json)"
+  # fly secrets import handles multi-line values when quoted
+  printf 'CLAUDE_CREDENTIALS_JSON=%s\n' "$(cat .claude-credentials.json)" >> "${SECRETS_FILE}"
   echo "Loaded Claude credentials from .claude-credentials.json"
 else
   echo "WARNING: .claude-credentials.json not found."
@@ -53,12 +51,7 @@ fi
 
 # ── Push secrets to Fly ───────────────────────────────────────────
 echo "Setting Fly.io secrets..."
-secret_args=()
-for key in "${!env_vars[@]}"; do
-  secret_args+=("${key}=${env_vars[${key}]}")
-done
-
-fly secrets set "${secret_args[@]}"
+fly secrets import < "${SECRETS_FILE}"
 echo "Secrets set successfully."
 
 # ── Deploy ────────────────────────────────────────────────────────

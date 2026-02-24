@@ -48,7 +48,7 @@ CRED_FILE="${HOME}/.claude/.credentials.json"
 
 # Write credentials from env var (Fly.io secrets path)
 if [[ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]]; then
-  echo "${CLAUDE_CREDENTIALS_JSON}" > "${CRED_FILE}"
+  printf '%s\n' "${CLAUDE_CREDENTIALS_JSON}" > "${CRED_FILE}"
   echo "[entrypoint] Wrote credentials from CLAUDE_CREDENTIALS_JSON"
 fi
 
