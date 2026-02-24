@@ -17,8 +17,9 @@ OWNER_EMAIL="${OWNER_EMAIL:-}"
 ALLOWED_SENDERS="${ALLOWED_SENDERS:-}"
 
 MAX_TURNS="${MAX_TURNS:-25}"
-DAILY_BUDGET_USD="${DAILY_BUDGET_USD:-5.00}"
-BUDGET_RESET_HOUR_UTC="${BUDGET_RESET_HOUR_UTC:-0}"
+WEEKLY_TURN_QUOTA="${WEEKLY_TURN_QUOTA:-1000}"
+QUOTA_RESET_DAY="${QUOTA_RESET_DAY:-4}"          # ISO weekday: 1=Mon..7=Sun (4=Thu)
+QUOTA_RESET_HOUR_UTC="${QUOTA_RESET_HOUR_UTC:-6}" # 06:00 UTC
 MAX_RETRIES_PER_MESSAGE="${MAX_RETRIES_PER_MESSAGE:-2}"
 ACTIVE_HOURS_UTC="${ACTIVE_HOURS_UTC:-}"
 REPORT_EVERY_N="${REPORT_EVERY_N:-10}"
@@ -56,11 +57,12 @@ init_state() {
   fi
 
   if [[ ! -f "${STATE_FILE}" ]]; then
-    local now
+    local now period_start
     now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    period_start=$(calculate_period_start)
     cat > "${STATE_FILE}" <<INITJSON
 {
-  "version": 2,
+  "version": 3,
   "budget": {
     "date": "$(date -u '+%Y-%m-%d')",
     "cost_usd": 0,
@@ -72,6 +74,16 @@ init_state() {
     "cache_creation_tokens": 0,
     "exhausted_notified": false,
     "last_report_invocation": 0
+  },
+  "weekly": {
+    "period_start": "${period_start}",
+    "turns_used": 0,
+    "invocations": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "emails_processed": 0
   },
   "monthly": {
     "month": "$(date -u '+%Y-%m')",
@@ -122,6 +134,24 @@ INITJSON
       .stats.total_input_tokens = (.stats.total_input_tokens // 0) |
       .stats.total_output_tokens = (.stats.total_output_tokens // 0)
     "
+    version=2
+  fi
+
+  # Migrate v2 → v3: add weekly turn-based pacing section
+  if [[ "${version}" -lt 3 ]]; then
+    log "Migrating state file v${version} → v3 (adding weekly turn pacing)."
+    local period_start
+    period_start=$(calculate_period_start)
+    state_update "
+      .version = 3 |
+      .weekly = (.weekly // {
+        \"period_start\": \"${period_start}\",
+        \"turns_used\": 0, \"invocations\": 0,
+        \"input_tokens\": 0, \"output_tokens\": 0,
+        \"cache_read_tokens\": 0, \"cache_creation_tokens\": 0,
+        \"emails_processed\": 0
+      })
+    "
   fi
 }
 
@@ -138,17 +168,15 @@ state_update() {
   jq "$1" "${STATE_FILE}" > "${tmp}" && mv "${tmp}" "${STATE_FILE}"
 }
 
-# Reset daily budget counters if the UTC date has changed and we've
-# passed the configured reset hour (BUDGET_RESET_HOUR_UTC).
-check_budget_reset() {
-  local today now_hour
+# Reset daily counters when the UTC date changes (midnight UTC).
+check_daily_reset() {
+  local today
   today=$(date -u '+%Y-%m-%d')
-  now_hour=$(date -u '+%-H')
   local state_date
   state_date=$(state_get '.budget.date')
 
-  if [[ "${state_date}" != "${today}" && "${now_hour}" -ge "${BUDGET_RESET_HOUR_UTC}" ]]; then
-    log "New budget period (${today}, reset hour ${BUDGET_RESET_HOUR_UTC}). Resetting daily counters."
+  if [[ "${state_date}" != "${today}" ]]; then
+    log "New day (${today}). Resetting daily counters."
     state_update "
       .budget.date = \"${today}\" |
       .budget.cost_usd = 0 |
@@ -160,6 +188,46 @@ check_budget_reset() {
       .budget.cache_creation_tokens = 0 |
       .budget.exhausted_notified = false |
       .budget.last_report_invocation = 0
+    "
+  fi
+}
+
+# Reset weekly counters when the current period_start is stale
+# (i.e., we've crossed the next reset boundary since it was set).
+check_weekly_reset() {
+  if [[ "${WEEKLY_TURN_QUOTA}" -eq 0 ]]; then
+    return 0  # quota enforcement disabled
+  fi
+
+  local period_start now_epoch period_start_epoch next_reset
+  period_start=$(state_get '.weekly.period_start // empty')
+  now_epoch=$(date -u +%s)
+
+  if [[ -z "${period_start}" ]]; then
+    # No period_start yet — initialize it
+    local new_start
+    new_start=$(calculate_period_start)
+    state_update ".weekly.period_start = \"${new_start}\""
+    return 0
+  fi
+
+  # Convert period_start to epoch. The next reset after that period_start is +7 days.
+  period_start_epoch=$(date -u -d "${period_start}" +%s 2>/dev/null || echo 0)
+  next_reset=$(( period_start_epoch + 7 * 86400 ))
+
+  if [[ "${now_epoch}" -ge "${next_reset}" ]]; then
+    local new_start
+    new_start=$(calculate_period_start)
+    log "Weekly reset! New period starts ${new_start}. Resetting weekly counters."
+    state_update "
+      .weekly.period_start = \"${new_start}\" |
+      .weekly.turns_used = 0 |
+      .weekly.invocations = 0 |
+      .weekly.input_tokens = 0 |
+      .weekly.output_tokens = 0 |
+      .weekly.cache_read_tokens = 0 |
+      .weekly.cache_creation_tokens = 0 |
+      .weekly.emails_processed = 0
     "
   fi
 }
@@ -199,21 +267,98 @@ format_tokens() {
   fi
 }
 
-# Return 0 (true) if daily budget has not been exhausted.
-# Budget enforcement is disabled when DAILY_BUDGET_USD=0.
-has_budget() {
-  if [[ $(echo "${DAILY_BUDGET_USD} == 0" | bc -l) -eq 1 ]]; then
-    return 0  # budget enforcement disabled
+# Calculate Unix epoch of the next weekly reset boundary.
+# Uses QUOTA_RESET_DAY (1=Mon..7=Sun) and QUOTA_RESET_HOUR_UTC.
+calculate_next_reset_epoch() {
+  local now_epoch target_day reset_hour
+  now_epoch=$(date -u +%s)
+  target_day="${QUOTA_RESET_DAY}"
+  reset_hour="${QUOTA_RESET_HOUR_UTC}"
+
+  # Find next occurrence of target_day at reset_hour UTC
+  local current_dow current_date_at_reset
+  current_dow=$(date -u -d "@${now_epoch}" +%u)  # 1=Mon..7=Sun
+  current_date_at_reset=$(date -u -d "$(date -u -d "@${now_epoch}" +%Y-%m-%d) ${reset_hour}:00:00" +%s)
+
+  local days_ahead
+  days_ahead=$(( (target_day - current_dow + 7) % 7 ))
+
+  # If today is the reset day but we haven't hit the hour yet, days_ahead=0 is correct.
+  # If today is the reset day and we're past the hour, jump to next week.
+  if [[ "${days_ahead}" -eq 0 && "${now_epoch}" -ge "${current_date_at_reset}" ]]; then
+    days_ahead=7
   fi
-  local spent
-  spent=$(state_get '.budget.cost_usd')
-  # bc returns 1 when the comparison is true
-  [[ $(echo "${spent} < ${DAILY_BUDGET_USD}" | bc -l) -eq 1 ]]
+
+  echo $(( current_date_at_reset + days_ahead * 86400 ))
+}
+
+# Fractional days remaining until the next weekly reset.
+calculate_days_until_reset() {
+  local now_epoch next_reset remaining_seconds
+  now_epoch=$(date -u +%s)
+  next_reset=$(calculate_next_reset_epoch)
+  remaining_seconds=$(( next_reset - now_epoch ))
+  echo "scale=2; ${remaining_seconds} / 86400" | bc -l
+}
+
+# Auto-pacing: ceil(remaining_turns / ceil(days_until_reset)).
+# Returns an integer daily allowance.
+calculate_daily_allowance() {
+  local weekly_used remaining_turns days_left days_ceil allowance
+  weekly_used=$(state_get '.weekly.turns_used // 0')
+  remaining_turns=$(( WEEKLY_TURN_QUOTA - weekly_used ))
+  if [[ "${remaining_turns}" -le 0 ]]; then
+    echo "0"
+    return
+  fi
+  days_left=$(calculate_days_until_reset)
+  # ceil(days_left) using bc integer truncation: t=d/1, then t+(d>t)
+  days_ceil=$(echo "scale=0; d=${days_left}; t=d/1; t + (d>t)" | bc)
+  if [[ -z "${days_ceil}" || "${days_ceil}" -le 0 ]]; then days_ceil=1; fi
+  # ceil(remaining / days_ceil)
+  allowance=$(( (remaining_turns + days_ceil - 1) / days_ceil ))
+  echo "${allowance}"
+}
+
+# ISO timestamp of the current period's start (next reset minus 7 days).
+calculate_period_start() {
+  local next_reset period_start_epoch
+  next_reset=$(calculate_next_reset_epoch)
+  period_start_epoch=$(( next_reset - 7 * 86400 ))
+  date -u -d "@${period_start_epoch}" '+%Y-%m-%dT%H:%M:%SZ'
+}
+
+# Return 0 (true) if the agent has turns remaining (two-level check).
+# HARD STOP: weekly turns exhausted → pause until weekly reset.
+# SOFT STOP: today's turns >= daily allowance → pause until tomorrow.
+# Quota enforcement is disabled when WEEKLY_TURN_QUOTA=0.
+has_turns() {
+  if [[ "${WEEKLY_TURN_QUOTA}" -eq 0 ]]; then
+    return 0  # quota enforcement disabled
+  fi
+
+  # HARD STOP: weekly quota exhausted
+  local weekly_used
+  weekly_used=$(state_get '.weekly.turns_used // 0')
+  if [[ "${weekly_used}" -ge "${WEEKLY_TURN_QUOTA}" ]]; then
+    return 1
+  fi
+
+  # SOFT STOP: today's pace exceeded
+  local daily_used daily_allowance
+  daily_used=$(state_get '.budget.turns_used // 0')
+  daily_allowance=$(calculate_daily_allowance)
+  if [[ "${daily_used}" -ge "${daily_allowance}" ]]; then
+    return 1
+  fi
+
+  return 0
 }
 
 # Record cost, turns, and token usage from a Claude JSON response.
-# Usage: charge_budget <cost_usd> <turns> <input_tokens> <output_tokens> <cache_read> <cache_create>
-charge_budget() {
+# Accumulates at daily, weekly, monthly, and lifetime levels.
+# Usage: charge_usage <cost_usd> <turns> <input_tokens> <output_tokens> <cache_read> <cache_create>
+charge_usage() {
   local cost="${1:-0}"
   local turns="${2:-0}"
   local in_tok="${3:-0}"
@@ -228,6 +373,12 @@ charge_budget() {
     .budget.output_tokens += ${out_tok} |
     .budget.cache_read_tokens += ${cache_read} |
     .budget.cache_creation_tokens += ${cache_create} |
+    .weekly.turns_used += ${turns} |
+    .weekly.invocations += 1 |
+    .weekly.input_tokens += ${in_tok} |
+    .weekly.output_tokens += ${out_tok} |
+    .weekly.cache_read_tokens += ${cache_read} |
+    .weekly.cache_creation_tokens += ${cache_create} |
     .monthly.cost_usd += ${cost} |
     .monthly.turns_used += ${turns} |
     .monthly.invocations += 1 |
@@ -303,6 +454,7 @@ complete_current_task() {
     .current_task = null |
     .stats.total_emails_processed += 1 |
     .stats.last_reply_at = \"${now}\" |
+    .weekly.emails_processed += 1 |
     .monthly.emails_processed += 1
   "
 }
@@ -345,18 +497,29 @@ notify_owner() {
     | sendmail -t 2>>/workspace/logs/claude-output.log || log "WARNING: Failed to send owner notification."
 }
 
-# Send a one-per-day notification when budget is exhausted.
-notify_budget_exhausted() {
+# Send a one-per-day notification when turn quota is exhausted.
+# Provides distinct messages for daily pace limit vs weekly hard stop.
+notify_quota_exhausted() {
   local already_notified
   already_notified=$(state_get '.budget.exhausted_notified')
   if [[ "${already_notified}" == "true" ]]; then
     return 0
   fi
 
-  local spent
-  spent=$(state_get '.budget.cost_usd')
-  notify_owner "Daily budget exhausted" \
-    "Spent \$${spent} of \$${DAILY_BUDGET_USD} daily budget. Agent paused until budget resets at ${BUDGET_RESET_HOUR_UTC}:00 UTC."
+  local weekly_used daily_used daily_allowance
+  weekly_used=$(state_get '.weekly.turns_used // 0')
+  daily_used=$(state_get '.budget.turns_used // 0')
+  daily_allowance=$(calculate_daily_allowance)
+  local days_left
+  days_left=$(calculate_days_until_reset)
+
+  if [[ "${weekly_used}" -ge "${WEEKLY_TURN_QUOTA}" ]]; then
+    notify_owner "Weekly quota exhausted" \
+      "Used ${weekly_used}/${WEEKLY_TURN_QUOTA} weekly turns. Agent paused until weekly reset (${QUOTA_RESET_DAY}@${QUOTA_RESET_HOUR_UTC}:00 UTC)."
+  else
+    notify_owner "Daily pace limit reached" \
+      "Used ${daily_used}/${daily_allowance} turns today (auto-paced over ${days_left} days remaining). Weekly: ${weekly_used}/${WEEKLY_TURN_QUOTA}. Resumes tomorrow."
+  fi
   state_update '.budget.exhausted_notified = true'
 }
 
@@ -384,6 +547,23 @@ maybe_send_usage_report() {
   d_out=$(state_get '.budget.output_tokens')
   d_emails=$(state_get '.stats.total_emails_processed')
 
+  # Gather weekly stats
+  local w_turns w_inv w_in w_out w_emails w_remaining days_left daily_allowance w_pct
+  w_turns=$(state_get '.weekly.turns_used // 0')
+  w_inv=$(state_get '.weekly.invocations // 0')
+  w_in=$(state_get '.weekly.input_tokens // 0')
+  w_out=$(state_get '.weekly.output_tokens // 0')
+  w_emails=$(state_get '.weekly.emails_processed // 0')
+  w_remaining=$(( WEEKLY_TURN_QUOTA - w_turns ))
+  if [[ "${w_remaining}" -lt 0 ]]; then w_remaining=0; fi
+  days_left=$(calculate_days_until_reset)
+  daily_allowance=$(calculate_daily_allowance)
+  if [[ "${WEEKLY_TURN_QUOTA}" -gt 0 ]]; then
+    w_pct=$(printf '%.0f' "$(echo "${w_turns} * 100 / ${WEEKLY_TURN_QUOTA}" | bc -l)")
+  else
+    w_pct="n/a"
+  fi
+
   # Gather monthly stats
   local m_month m_inv m_cost m_turns m_in m_out m_emails
   m_month=$(state_get '.monthly.month')
@@ -393,10 +573,6 @@ maybe_send_usage_report() {
   m_in=$(state_get '.monthly.input_tokens')
   m_out=$(state_get '.monthly.output_tokens')
   m_emails=$(state_get '.monthly.emails_processed')
-
-  # Calculate plan utilization (phantom cost as % of $300 Max plan)
-  local plan_pct
-  plan_pct=$(printf '%.0f' "$(echo "${m_cost} / 300 * 100" | bc -l)")
 
   # Format month name
   local month_name
@@ -410,16 +586,22 @@ maybe_send_usage_report() {
 Today (${today}):
   Invocations:  ${d_inv}
   Emails sent:  ${d_emails}
-  Turns used:   ${d_turns}
+  Turns used:   ${d_turns} / ${daily_allowance} (auto-paced)
   Tokens:       $(format_tokens "${d_in}") input / $(format_tokens "${d_out}") output
-  API equiv:    \$${d_cost}
+
+This week (${days_left} days until reset):
+  Turns used:   ${w_turns} / ${WEEKLY_TURN_QUOTA} (${w_pct}%, ${w_remaining} remaining)
+  Invocations:  ${w_inv}
+  Emails sent:  ${w_emails}
+  Tokens:       $(format_tokens "${w_in}") input / $(format_tokens "${w_out}") output
+  Daily pace:   ${daily_allowance} turns/day
 
 This month (${month_name}):
   Invocations:  ${m_inv}
   Emails sent:  ${m_emails}
   Turns used:   ${m_turns}
   Tokens:       $(format_tokens "${m_in}") input / $(format_tokens "${m_out}") output
-  API equiv:    \$${m_cost} (~${plan_pct}% of \$300 plan)
+  API equiv:    \$${m_cost} (phantom — Max plan, no actual charges)
 REPORT
   )
 
@@ -493,15 +675,16 @@ log "  Owner:      ${OWNER_EMAIL:-not set}"
 log "  CC email:   ${CC_EMAIL:-none}"
 log "  IMAP host:  ${IMAP_HOST}"
 log "  Poll every: ${POLL_INTERVAL}s"
-log "  Max turns:    ${MAX_TURNS}/invocation"
-log "  Daily budget: \$${DAILY_BUDGET_USD}"
-log "  Usage report: every ${REPORT_EVERY_N} invocations (0=disabled)"
+log "  Max turns:      ${MAX_TURNS}/invocation"
+log "  Weekly quota:   ${WEEKLY_TURN_QUOTA} turns (reset: day ${QUOTA_RESET_DAY} @ ${QUOTA_RESET_HOUR_UTC}:00 UTC)"
+log "  Usage report:   every ${REPORT_EVERY_N} invocations (0=disabled)"
 log "  Active hours: ${ACTIVE_HOURS_UTC:-always}"
 log ""
 
 mkdir -p /workspace/logs
 init_state
-check_budget_reset
+check_daily_reset
+check_weekly_reset
 check_monthly_reset
 
 # Resolve the persona file based on AGENT_NAME
@@ -546,10 +729,16 @@ GREETING_SENT="/workspace/logs/.greeting-sent"
 if [[ "${SEND_FIRST:-false}" == "true" && ! -f "${GREETING_SENT}" ]]; then
   log "SEND_FIRST=true — composing opening message..."
 
-  BUDGET_REMAINING=$(echo "${DAILY_BUDGET_USD} - $(state_get '.budget.cost_usd')" | bc)
+  WEEKLY_USED=$(state_get '.weekly.turns_used // 0')
+  WEEKLY_REMAINING=$(( WEEKLY_TURN_QUOTA - WEEKLY_USED ))
+  if [[ "${WEEKLY_REMAINING}" -lt 0 ]]; then WEEKLY_REMAINING=0; fi
+  DAILY_USED=$(state_get '.budget.turns_used // 0')
+  DAILY_ALLOW=$(calculate_daily_allowance)
+  DAYS_LEFT=$(calculate_days_until_reset)
   BUDGET_CONTEXT="=== OPERATIONAL CONTEXT ===
 Turns this invocation: max ${MAX_TURNS}
-Daily budget remaining: ~\$${BUDGET_REMAINING}
+Weekly quota: ${WEEKLY_USED}/${WEEKLY_TURN_QUOTA} turns (${WEEKLY_REMAINING} remaining)
+Today's pace: ${DAILY_USED}/${DAILY_ALLOW} turns (auto-paced over ${DAYS_LEFT} days)
 If working on a complex task, prioritize completing it over verbose explanations.
 If you can't finish within your turn limit, say so — you'll get another invocation.
 === END OPERATIONAL CONTEXT ==="
@@ -603,10 +792,10 @@ EOF
   # Log the result text
   echo "${CLAUDE_OUTPUT}" | jq -r '.result // empty' >> /workspace/logs/claude-output.log
 
-  charge_budget "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}"
+  charge_usage "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}"
 
   date > "${GREETING_SENT}"
-  log "Opening message sent (or attempted). Turns: ${TURNS_USED}, tokens: $(format_tokens "${INPUT_TOKENS}") in / $(format_tokens "${OUTPUT_TOKENS}") out, cost: \$${COST_USD} (API equiv). Entering poll loop."
+  log "Opening message sent (or attempted). Turns: ${TURNS_USED}, tokens: $(format_tokens "${INPUT_TOKENS}") in / $(format_tokens "${OUTPUT_TOKENS}") out. Entering poll loop."
 fi
 
 # ── Main Loop ────────────────────────────────────────────────────
@@ -632,7 +821,8 @@ while true; do
   # Refresh journal context from disk (picks up changes Claudius made locally)
   JOURNAL_CONTEXT=$(load_journal_index)
 
-  check_budget_reset
+  check_daily_reset
+  check_weekly_reset
   check_monthly_reset
 
   if ! is_active_hours; then
@@ -640,9 +830,12 @@ while true; do
     sleep "${POLL_INTERVAL}"; continue
   fi
 
-  if ! has_budget; then
-    log "Daily budget exhausted (\$$(state_get '.budget.cost_usd')/\$${DAILY_BUDGET_USD})."
-    notify_budget_exhausted
+  if ! has_turns; then
+    W_USED=$(state_get '.weekly.turns_used // 0')
+    D_USED=$(state_get '.budget.turns_used // 0')
+    D_ALLOW=$(calculate_daily_allowance)
+    log "Turn quota reached (weekly: ${W_USED}/${WEEKLY_TURN_QUOTA}, today: ${D_USED}/${D_ALLOW})."
+    notify_quota_exhausted
     sleep "${POLL_INTERVAL}"; continue
   fi
 
@@ -709,10 +902,10 @@ while true; do
       continue
     fi
 
-    # Check budget before each invocation
-    if ! has_budget; then
-      log "  Budget exhausted mid-batch. Skipping remaining."
-      notify_budget_exhausted
+    # Check turn quota before each invocation
+    if ! has_turns; then
+      log "  Turn quota reached mid-batch. Skipping remaining."
+      notify_quota_exhausted
       break  # exit inner loop; outer loop sleeps
     fi
 
@@ -736,11 +929,17 @@ LOGENTRY
       HISTORY=$(tail -n 80 "${CONVERSATION_LOG}")
     fi
 
-    # Build budget context for Claude
-    BUDGET_REMAINING=$(echo "${DAILY_BUDGET_USD} - $(state_get '.budget.cost_usd')" | bc)
+    # Build turn-based quota context for Claude
+    WEEKLY_USED=$(state_get '.weekly.turns_used // 0')
+    WEEKLY_REMAINING=$(( WEEKLY_TURN_QUOTA - WEEKLY_USED ))
+    if [[ "${WEEKLY_REMAINING}" -lt 0 ]]; then WEEKLY_REMAINING=0; fi
+    DAILY_USED=$(state_get '.budget.turns_used // 0')
+    DAILY_ALLOW=$(calculate_daily_allowance)
+    DAYS_LEFT=$(calculate_days_until_reset)
     BUDGET_CONTEXT="=== OPERATIONAL CONTEXT ===
 Turns this invocation: max ${MAX_TURNS}
-Daily budget remaining: ~\$${BUDGET_REMAINING}
+Weekly quota: ${WEEKLY_USED}/${WEEKLY_TURN_QUOTA} turns (${WEEKLY_REMAINING} remaining)
+Today's pace: ${DAILY_USED}/${DAILY_ALLOW} turns (auto-paced over ${DAYS_LEFT} days)
 If working on a complex task, prioritize completing it over verbose explanations.
 If you can't finish within your turn limit, say so — you'll get another invocation.
 === END OPERATIONAL CONTEXT ==="
@@ -808,14 +1007,14 @@ EOF
     # Log the result text
     echo "${CLAUDE_OUTPUT}" | jq -r '.result // empty' >> /workspace/logs/claude-output.log
 
-    charge_budget "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}"
+    charge_usage "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}"
 
     if [[ "${CLAUDE_EXIT}" -eq 0 && "${IS_ERROR}" == "false" ]]; then
       complete_current_task
       # Mark the message as read now that it's been processed
       mark-read "${MSG_UID}" 2>>/workspace/logs/fetch-mail-err.log \
         || log "  WARNING: failed to mark UID ${MSG_UID} as read"
-      log "Reply processed. Turns: ${TURNS_USED}, tokens: $(format_tokens "${INPUT_TOKENS}") in / $(format_tokens "${OUTPUT_TOKENS}") out, cost: \$${COST_USD} (API equiv)."
+      log "Reply processed. Turns: ${TURNS_USED}, tokens: $(format_tokens "${INPUT_TOKENS}") in / $(format_tokens "${OUTPUT_TOKENS}") out."
       maybe_send_usage_report
     else
       log "  WARNING: Claude invocation failed (exit=${CLAUDE_EXIT}, is_error=${IS_ERROR}). Will retry next poll."
