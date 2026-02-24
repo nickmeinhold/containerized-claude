@@ -1,3 +1,6 @@
+# OS artifacts
+.DS_Store
+
 # Secrets — never commit these
 .env
 msmtprc
