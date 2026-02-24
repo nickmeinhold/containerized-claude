@@ -17,6 +17,8 @@ Dockerized Claude Code agent that runs headlessly, polls an IMAP inbox, and repl
 
 ## Running
 
+### Docker Compose (local / any server with Docker)
+
 All `docker compose` commands must be run from this directory (`claudius-maximus-container/`), since this is where `docker-compose.yml` and the Dockerfile build context live.
 
 ```bash
@@ -28,9 +30,33 @@ docker compose logs -f     # tail logs
 docker compose down        # stop
 ```
 
+### Fly.io (persistent cloud deployment)
+
+```bash
+cd claudius-maximus-container
+fly launch --no-deploy                                      # create app & pick region
+fly volumes create claudius_data --region <region> --size 1  # 1 GB persistent storage
+./deploy-fly.sh                                             # push secrets & deploy
+```
+
+After first deploy:
+```bash
+fly deploy           # redeploy after code changes
+fly logs             # tail logs
+fly ssh console      # shell into the machine
+```
+
+The entrypoint auto-detects Fly.io (persistent volume at `/workspace/persistent`) and:
+- Symlinks `logs/` and `repos/` into the volume for persistence
+- Generates `/etc/msmtprc` from `SMTP_HOST` / `IMAP_PASS` env vars (no bind mount needed)
+- Writes Claude credentials from `CLAUDE_CREDENTIALS_JSON` secret
+
+See `fly.toml` and `deploy-fly.sh` for details.
+
 ## Auth
 
-- OAuth credentials extracted from macOS Keychain → mounted at `~/.claude/.credentials.json` in the Linux container (plaintext credential store)
+- **Docker Compose**: OAuth credentials extracted from macOS Keychain → bind-mounted at `~/.claude/.credentials.json`
+- **Fly.io**: Credentials set as `CLAUDE_CREDENTIALS_JSON` secret → written to file at startup
 - On macOS: `security find-generic-password -s "Claude Code-credentials" -w`
 - On Linux: Claude Code reads from `~/.claude/.credentials.json` (NOT `~/.claude.json`)
 
