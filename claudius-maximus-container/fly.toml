@@ -1,0 +1,29 @@
+# Claudius Maximus — Fly.io deployment
+#
+# Setup:
+#   1. fly launch --no-deploy          (creates app, picks region)
+#   2. fly volumes create claudius_data --region <region> --size 1
+#   3. ./deploy-fly.sh                 (sets secrets from .env & deploys)
+#
+# After first deploy:
+#   fly deploy                         (redeploy after code changes)
+#   fly logs                           (tail logs)
+#   fly ssh console                    (shell into the machine)
+
+# Placeholder — `fly launch` will prompt for a unique name and update this.
+app = "claudius-maximus"
+primary_region = "iad"
+
+[build]
+  # Uses the existing Dockerfile
+
+[mounts]
+  source = "claudius_data"
+  destination = "/workspace/persistent"
+
+[vm]
+  size = "shared-cpu-1x"
+  memory = 512
+
+# Headless email-polling worker — no HTTP service.
+# Machine restarts automatically on failure.

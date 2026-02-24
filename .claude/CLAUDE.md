@@ -27,10 +27,10 @@ See `claudius-maximus-container/CLAUDE.md` for architecture, configuration, and 
 
 ## Known Issues / TODO
 
-### App Password in two places
-When rotating the Gmail App Password, it must be updated in both:
+### App Password in two places (docker-compose only)
+When using docker-compose with a bind-mounted `msmtprc`, the Gmail App Password must be updated in both:
 - `.env` (`IMAP_PASS`) — used by `fetch-mail.py` for IMAP
 - `msmtprc` (`password`) — used by msmtp for SMTP
 
-**TODO:** Consider templating `msmtprc` from env vars in the entrypoint script so there's a single source of truth for the password.
+**Workaround:** Set `SMTP_HOST=smtp.gmail.com` in `.env` and the entrypoint will generate `msmtprc` from env vars automatically, using `IMAP_PASS` as the single source of truth. This is the default path on Fly.io.
 

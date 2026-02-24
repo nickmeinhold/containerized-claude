@@ -1,16 +1,62 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────
 # Entrypoint — verifies credentials are present, then runs agent-loop.
+# Works with both docker-compose (bind mounts) and Fly.io (env secrets).
 # ─────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# ── Persistent volume (Fly.io) ────────────────────────────────────
+# Fly.io mounts a single volume at /workspace/persistent.
+# Symlink logs/ and repos/ into it so paths stay consistent.
+if [[ -d /workspace/persistent ]]; then
+  mkdir -p /workspace/persistent/logs /workspace/persistent/repos
+  # Replace build-time directories with symlinks (skip if already linked)
+  for dir in logs repos; do
+    if [[ -d "/workspace/${dir}" && ! -L "/workspace/${dir}" ]]; then
+      rm -rf "/workspace/${dir}"
+    fi
+    ln -sfn "/workspace/persistent/${dir}" "/workspace/${dir}"
+  done
+  echo "[entrypoint] Linked persistent volume for logs and repos"
+fi
+
+# ── Generate msmtprc from env vars ───────────────────────────────
+# Single source of truth for SMTP password — no more duplicating it
+# in both .env and msmtprc. Falls back to the bind-mounted file if
+# SMTP_HOST is not set (docker-compose path).
+if [[ -n "${SMTP_HOST:-}" ]]; then
+  cat > /etc/msmtprc <<MSMTP
+defaults
+auth           on
+tls            on
+tls_trust_file /etc/ssl/certs/ca-certificates.crt
+logfile        /var/log/msmtp.log
+
+account        default
+host           ${SMTP_HOST}
+port           ${SMTP_PORT:-587}
+from           ${MY_EMAIL}
+user           ${SMTP_USER:-${MY_EMAIL}}
+password       ${SMTP_PASS:-${IMAP_PASS}}
+MSMTP
+  chmod 600 /etc/msmtprc
+  echo "[entrypoint] Generated /etc/msmtprc from env vars"
+fi
+
+# ── Claude credentials ────────────────────────────────────────────
 CRED_FILE="${HOME}/.claude/.credentials.json"
+
+# Write credentials from env var (Fly.io secrets path)
+if [[ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]]; then
+  printf '%s\n' "${CLAUDE_CREDENTIALS_JSON}" > "${CRED_FILE}"
+  echo "[entrypoint] Wrote credentials from CLAUDE_CREDENTIALS_JSON"
+fi
 
 if [[ -f "${CRED_FILE}" ]]; then
   echo "[entrypoint] Found credentials at ${CRED_FILE}"
 else
   echo "[entrypoint] WARNING: No credentials file at ${CRED_FILE}"
-  echo "[entrypoint] Mount your .claude-credentials.json there or set ANTHROPIC_API_KEY"
+  echo "[entrypoint] Mount .claude-credentials.json, set CLAUDE_CREDENTIALS_JSON, or set ANTHROPIC_API_KEY"
 fi
 
 # Configure git identity
