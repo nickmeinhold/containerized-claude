@@ -27,7 +27,7 @@ RUN mkdir -p /home/claudius/.claude/commands /workspace/logs \
 # Copy committed Claude config — CLAUDE.md lives in .claude/ (tracked in git).
 # Custom commands/ and plans/ can be added by mounting or extending the image;
 # directories are already created above.
-COPY .claude/CLAUDE.md /home/claudius/.claude/CLAUDE.md
+COPY CLAUDE.md /home/claudius/.claude/CLAUDE.md
 
 # Copy application files
 COPY settings.json /home/claudius/.claude/settings.json
