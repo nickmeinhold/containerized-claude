@@ -92,3 +92,26 @@ Persisted at `/workspace/logs/agent-state.json` (Docker named volume). Tracks:
 - **stats** — lifetime counters (total invocations, emails, cost)
 
 Corrupt state files are automatically backed up and reinitialized. Owner is notified via email when budget is exhausted (once per day) or when a task exceeds max retries.
+
+## Known Issues / TODO
+
+### OAuth token expiry
+The container mounts `.claude-credentials.json` as read-only, so Claude Code can't persist refreshed tokens. The access token expires roughly every 12 hours. To refresh:
+```bash
+security find-generic-password -s "Claude Code-credentials" -w > claudius-maximus-container/.claude-credentials.json
+docker compose -f claudius-maximus-container/docker-compose.yml up -d --force-recreate
+```
+**TODO:** Investigate mounting credentials read-write so Claude Code can auto-refresh, or add an entrypoint step that refreshes the token on startup.
+
+### Budget cap tracks phantom dollars on Max plan
+`DAILY_BUDGET_USD` tracks API-equivalent cost from `total_cost_usd` in the JSON response, not actual charges. On a Claude Max subscription (flat rate), this is misleading — the real constraint is the rate limit tier, not dollars. Consider reworking the budget system to cap on **turns per day** instead, since turns are the actual scarce resource on Max.
+
+### App Password in two places
+When rotating the Gmail App Password, it must be updated in both:
+- `.env` (`IMAP_PASS`) — used by `fetch-mail.py` for IMAP
+- `msmtprc` (`password`) — used by msmtp for SMTP
+
+**TODO:** Consider templating `msmtprc` from env vars in the entrypoint script so there's a single source of truth for the password.
+
+### IMAP fetch marks messages as seen
+Gmail marks messages as `\Seen` when fetched with `RFC822`. If Claude fails to process a message after fetching, it won't appear as unread on the next poll. **TODO:** Switch `fetch-mail.py` to use `BODY.PEEK[]` instead of `RFC822` to avoid this.
