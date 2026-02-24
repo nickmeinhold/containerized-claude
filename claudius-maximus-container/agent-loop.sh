@@ -21,6 +21,7 @@ DAILY_BUDGET_USD="${DAILY_BUDGET_USD:-5.00}"
 BUDGET_RESET_HOUR_UTC="${BUDGET_RESET_HOUR_UTC:-0}"
 MAX_RETRIES_PER_MESSAGE="${MAX_RETRIES_PER_MESSAGE:-2}"
 ACTIVE_HOURS_UTC="${ACTIVE_HOURS_UTC:-}"
+REPORT_EVERY_N="${REPORT_EVERY_N:-10}"
 STATE_FILE="/workspace/logs/agent-state.json"
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -57,13 +58,29 @@ init_state() {
     now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
     cat > "${STATE_FILE}" <<INITJSON
 {
-  "version": 1,
+  "version": 2,
   "budget": {
     "date": "$(date -u '+%Y-%m-%d')",
     "cost_usd": 0,
     "turns_used": 0,
     "invocations": 0,
-    "exhausted_notified": false
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "exhausted_notified": false,
+    "last_report_invocation": 0
+  },
+  "monthly": {
+    "month": "$(date -u '+%Y-%m')",
+    "cost_usd": 0,
+    "turns_used": 0,
+    "invocations": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "emails_processed": 0
   },
   "current_task": null,
   "failed_tasks": [],
@@ -71,12 +88,38 @@ init_state() {
     "total_invocations": 0,
     "total_emails_processed": 0,
     "total_cost_usd": 0,
+    "total_input_tokens": 0,
+    "total_output_tokens": 0,
     "last_reply_at": null,
     "uptime_since": "${now}"
   }
 }
 INITJSON
     log "Initialized state file at ${STATE_FILE}"
+  fi
+
+  # Migrate v1 → v2: add token tracking and monthly section if missing
+  local version
+  version=$(state_get '.version // 1')
+  if [[ "${version}" -lt 2 ]]; then
+    log "Migrating state file v${version} → v2 (adding token tracking)."
+    state_update "
+      .version = 2 |
+      .budget.input_tokens = (.budget.input_tokens // 0) |
+      .budget.output_tokens = (.budget.output_tokens // 0) |
+      .budget.cache_read_tokens = (.budget.cache_read_tokens // 0) |
+      .budget.cache_creation_tokens = (.budget.cache_creation_tokens // 0) |
+      .budget.last_report_invocation = (.budget.last_report_invocation // 0) |
+      .monthly = (.monthly // {
+        \"month\": \"$(date -u '+%Y-%m')\",
+        \"cost_usd\": 0, \"turns_used\": 0, \"invocations\": 0,
+        \"input_tokens\": 0, \"output_tokens\": 0,
+        \"cache_read_tokens\": 0, \"cache_creation_tokens\": 0,
+        \"emails_processed\": 0
+      }) |
+      .stats.total_input_tokens = (.stats.total_input_tokens // 0) |
+      .stats.total_output_tokens = (.stats.total_output_tokens // 0)
+    "
   fi
 }
 
@@ -109,8 +152,48 @@ check_budget_reset() {
       .budget.cost_usd = 0 |
       .budget.turns_used = 0 |
       .budget.invocations = 0 |
-      .budget.exhausted_notified = false
+      .budget.input_tokens = 0 |
+      .budget.output_tokens = 0 |
+      .budget.cache_read_tokens = 0 |
+      .budget.cache_creation_tokens = 0 |
+      .budget.exhausted_notified = false |
+      .budget.last_report_invocation = 0
     "
+  fi
+}
+
+# Reset monthly counters when the calendar month changes (YYYY-MM).
+check_monthly_reset() {
+  local this_month
+  this_month=$(date -u '+%Y-%m')
+  local state_month
+  state_month=$(state_get '.monthly.month // empty')
+
+  if [[ "${state_month}" != "${this_month}" ]]; then
+    log "New month (${this_month}). Resetting monthly counters."
+    state_update "
+      .monthly.month = \"${this_month}\" |
+      .monthly.cost_usd = 0 |
+      .monthly.turns_used = 0 |
+      .monthly.invocations = 0 |
+      .monthly.input_tokens = 0 |
+      .monthly.output_tokens = 0 |
+      .monthly.cache_read_tokens = 0 |
+      .monthly.cache_creation_tokens = 0 |
+      .monthly.emails_processed = 0
+    "
+  fi
+}
+
+# Format a token count for human-readable display (e.g. 3200 → "3.2k").
+format_tokens() {
+  local n="${1:-0}"
+  if [[ "${n}" -ge 1000000 ]]; then
+    printf '%.1fM' "$(echo "${n} / 1000000" | bc -l)"
+  elif [[ "${n}" -ge 1000 ]]; then
+    printf '%.1fk' "$(echo "${n} / 1000" | bc -l)"
+  else
+    echo "${n}"
   fi
 }
 
@@ -126,17 +209,34 @@ has_budget() {
   [[ $(echo "${spent} < ${DAILY_BUDGET_USD}" | bc -l) -eq 1 ]]
 }
 
-# Record actual cost and turns from a Claude JSON response.
-# Usage: charge_budget <cost_usd> <turns>
+# Record cost, turns, and token usage from a Claude JSON response.
+# Usage: charge_budget <cost_usd> <turns> <input_tokens> <output_tokens> <cache_read> <cache_create>
 charge_budget() {
   local cost="${1:-0}"
   local turns="${2:-0}"
+  local in_tok="${3:-0}"
+  local out_tok="${4:-0}"
+  local cache_read="${5:-0}"
+  local cache_create="${6:-0}"
   state_update "
     .budget.cost_usd += ${cost} |
     .budget.turns_used += ${turns} |
     .budget.invocations += 1 |
+    .budget.input_tokens += ${in_tok} |
+    .budget.output_tokens += ${out_tok} |
+    .budget.cache_read_tokens += ${cache_read} |
+    .budget.cache_creation_tokens += ${cache_create} |
+    .monthly.cost_usd += ${cost} |
+    .monthly.turns_used += ${turns} |
+    .monthly.invocations += 1 |
+    .monthly.input_tokens += ${in_tok} |
+    .monthly.output_tokens += ${out_tok} |
+    .monthly.cache_read_tokens += ${cache_read} |
+    .monthly.cache_creation_tokens += ${cache_create} |
     .stats.total_invocations += 1 |
-    .stats.total_cost_usd += ${cost}
+    .stats.total_cost_usd += ${cost} |
+    .stats.total_input_tokens += ${in_tok} |
+    .stats.total_output_tokens += ${out_tok}
   "
 }
 
@@ -200,7 +300,8 @@ complete_current_task() {
   state_update "
     .current_task = null |
     .stats.total_emails_processed += 1 |
-    .stats.last_reply_at = \"${now}\"
+    .stats.last_reply_at = \"${now}\" |
+    .monthly.emails_processed += 1
   "
 }
 
@@ -257,6 +358,74 @@ notify_budget_exhausted() {
   state_update '.budget.exhausted_notified = true'
 }
 
+# Send a periodic usage report email to the owner.
+# Called after each successful invocation; fires every REPORT_EVERY_N invocations.
+maybe_send_usage_report() {
+  if [[ "${REPORT_EVERY_N}" -le 0 ]]; then
+    return 0  # reporting disabled
+  fi
+
+  local total_inv last_report
+  total_inv=$(state_get '.stats.total_invocations')
+  last_report=$(state_get '.budget.last_report_invocation // 0')
+
+  if [[ $((total_inv - last_report)) -lt "${REPORT_EVERY_N}" ]]; then
+    return 0  # not time yet
+  fi
+
+  # Gather daily stats
+  local d_inv d_cost d_turns d_in d_out d_emails
+  d_inv=$(state_get '.budget.invocations')
+  d_cost=$(state_get '.budget.cost_usd')
+  d_turns=$(state_get '.budget.turns_used')
+  d_in=$(state_get '.budget.input_tokens')
+  d_out=$(state_get '.budget.output_tokens')
+  d_emails=$(state_get '.stats.total_emails_processed')
+
+  # Gather monthly stats
+  local m_month m_inv m_cost m_turns m_in m_out m_emails
+  m_month=$(state_get '.monthly.month')
+  m_inv=$(state_get '.monthly.invocations')
+  m_cost=$(state_get '.monthly.cost_usd')
+  m_turns=$(state_get '.monthly.turns_used')
+  m_in=$(state_get '.monthly.input_tokens')
+  m_out=$(state_get '.monthly.output_tokens')
+  m_emails=$(state_get '.monthly.emails_processed')
+
+  # Calculate plan utilization (phantom cost as % of $300 Max plan)
+  local plan_pct
+  plan_pct=$(printf '%.0f' "$(echo "${m_cost} / 300 * 100" | bc -l)")
+
+  # Format month name
+  local month_name
+  month_name=$(date -u -d "${m_month}-01" '+%B' 2>/dev/null || date -u -j -f '%Y-%m-%d' "${m_month}-01" '+%B' 2>/dev/null || echo "${m_month}")
+
+  local today
+  today=$(date -u '+%Y-%m-%d')
+
+  local body
+  body=$(cat <<REPORT
+Today (${today}):
+  Invocations:  ${d_inv}
+  Emails sent:  ${d_emails}
+  Turns used:   ${d_turns}
+  Tokens:       $(format_tokens "${d_in}") input / $(format_tokens "${d_out}") output
+  API equiv:    \$${d_cost}
+
+This month (${month_name}):
+  Invocations:  ${m_inv}
+  Emails sent:  ${m_emails}
+  Turns used:   ${m_turns}
+  Tokens:       $(format_tokens "${m_in}") input / $(format_tokens "${m_out}") output
+  API equiv:    \$${m_cost} (~${plan_pct}% of \$300 plan)
+REPORT
+  )
+
+  notify_owner "Usage report" "${body}"
+  state_update ".budget.last_report_invocation = ${total_inv}"
+  log "Usage report sent (invocation #${total_inv})."
+}
+
 check_required_vars() {
   local missing=()
   for var in IMAP_HOST IMAP_USER IMAP_PASS PEER_EMAIL MY_EMAIL; do
@@ -284,6 +453,33 @@ cc_header() {
   fi
 }
 
+# Load the research journal INDEX.md for prompt injection.
+# Returns empty string if journal doesn't exist yet (graceful degradation).
+load_journal_index() {
+  local repo="${JOURNAL_REPO:-gaylejewon/research-journal}"
+  local index="/workspace/repos/${repo}/INDEX.md"
+  if [[ ! -f "${index}" ]]; then
+    return
+  fi
+  local content max_lines=60
+  content=$(head -n "${max_lines}" "${index}")
+  local total_lines
+  total_lines=$(wc -l < "${index}" | tr -d ' ')
+  local truncation_note=""
+  if [[ "${total_lines}" -gt "${max_lines}" ]]; then
+    truncation_note="
+[INDEX.md truncated — ${total_lines} lines on disk, showing first ${max_lines}. Consolidate entries!]"
+  fi
+  cat <<JRNL
+=== YOUR RESEARCH JOURNAL ===
+This is your persistent memory — updated entries survive across invocations.
+Repo: /workspace/repos/${repo}
+
+${content}${truncation_note}
+=== END RESEARCH JOURNAL ===
+JRNL
+}
+
 # ── Startup ──────────────────────────────────────────────────────
 
 check_required_vars
@@ -298,12 +494,14 @@ log "  IMAP host:  ${IMAP_HOST}"
 log "  Poll every: ${POLL_INTERVAL}s"
 log "  Max turns:    ${MAX_TURNS}/invocation"
 log "  Daily budget: \$${DAILY_BUDGET_USD}"
+log "  Usage report: every ${REPORT_EVERY_N} invocations (0=disabled)"
 log "  Active hours: ${ACTIVE_HOURS_UTC:-always}"
 log ""
 
 mkdir -p /workspace/logs
 init_state
 check_budget_reset
+check_monthly_reset
 
 # Resolve the persona file based on AGENT_NAME
 AGENT_NAME_LOWER=$(echo "${AGENT_NAME}" | tr '[:upper:]' '[:lower:]')
@@ -321,6 +519,14 @@ fi
 CC_INSTRUCTION=""
 if [[ -n "${CC_EMAIL}" ]]; then
   CC_INSTRUCTION="IMPORTANT: Always include this Cc header in your emails: Cc: ${CC_EMAIL}"
+fi
+
+# Load research journal context
+JOURNAL_CONTEXT=$(load_journal_index)
+if [[ -n "${JOURNAL_CONTEXT}" ]]; then
+  log "Loaded research journal index"
+else
+  log "No research journal found — Claudius will create it on first need"
 fi
 
 # Build owner context
@@ -351,6 +557,8 @@ If you can't finish within your turn limit, say so — you'll get another invoca
 ${PERSONA}
 
 ${BUDGET_CONTEXT}
+
+${JOURNAL_CONTEXT}
 
 You are starting a brand new email conversation. Your email address is ${MY_EMAIL}
 and you're writing to your pen pal at ${PEER_EMAIL}.
@@ -383,17 +591,21 @@ EOF
     2>>/workspace/logs/claude-output.log) || CLAUDE_EXIT=$?
   if [[ -z "${CLAUDE_OUTPUT}" ]]; then CLAUDE_OUTPUT="{}"; fi
 
-  # Parse actual cost and turns from JSON response
+  # Parse actual cost, turns, and token usage from JSON response
   TURNS_USED=$(echo "${CLAUDE_OUTPUT}" | jq -r '.num_turns // 0')
   COST_USD=$(echo "${CLAUDE_OUTPUT}" | jq -r '.total_cost_usd // 0')
+  INPUT_TOKENS=$(echo "${CLAUDE_OUTPUT}" | jq '.usage.input_tokens // 0')
+  OUTPUT_TOKENS=$(echo "${CLAUDE_OUTPUT}" | jq '.usage.output_tokens // 0')
+  CACHE_READ=$(echo "${CLAUDE_OUTPUT}" | jq '.usage.cache_read_input_tokens // 0')
+  CACHE_CREATE=$(echo "${CLAUDE_OUTPUT}" | jq '.usage.cache_creation_input_tokens // 0')
 
   # Log the result text
   echo "${CLAUDE_OUTPUT}" | jq -r '.result // empty' >> /workspace/logs/claude-output.log
 
-  charge_budget "${COST_USD}" "${TURNS_USED}"
+  charge_budget "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}"
 
   date > "${GREETING_SENT}"
-  log "Opening message sent (or attempted). Cost: \$${COST_USD}, turns: ${TURNS_USED}. Entering poll loop."
+  log "Opening message sent (or attempted). Turns: ${TURNS_USED}, tokens: $(format_tokens "${INPUT_TOKENS}") in / $(format_tokens "${OUTPUT_TOKENS}") out, cost: \$${COST_USD} (API equiv). Entering poll loop."
 fi
 
 # ── Main Loop ────────────────────────────────────────────────────
@@ -404,14 +616,25 @@ while true; do
   LOOP_COUNT=$((LOOP_COUNT + 1))
   log "── Poll #${LOOP_COUNT} ──────────────────────────────────"
 
-  # Rotate logs every 10 polls
+  # Rotate logs and sync journal every 10 polls
   if (( LOOP_COUNT % 10 == 0 )); then
     truncate_log "${CONVERSATION_LOG}" 1048576       # 1MB
     truncate_log /workspace/logs/claude-output.log 1048576
     truncate_log /workspace/logs/fetch-mail-err.log 524288  # 512KB
+
+    # Pull latest journal from remote
+    JOURNAL_REPO_VAR="${JOURNAL_REPO:-gaylejewon/research-journal}"
+    JOURNAL_DIR="/workspace/repos/${JOURNAL_REPO_VAR}"
+    if [[ -d "${JOURNAL_DIR}/.git" ]]; then
+      git -C "${JOURNAL_DIR}" pull --ff-only 2>/dev/null || true
+    fi
   fi
 
+  # Refresh journal context from disk (picks up changes Claudius made locally)
+  JOURNAL_CONTEXT=$(load_journal_index)
+
   check_budget_reset
+  check_monthly_reset
 
   if ! is_active_hours; then
     log "Outside active hours (${ACTIVE_HOURS_UTC}). Sleeping..."
@@ -533,6 +756,8 @@ You are ${AGENT_NAME} (${MY_EMAIL}).
 
 ${OWNER_CONTEXT}
 
+${JOURNAL_CONTEXT}
+
 Here is the recent conversation history:
 --- CONVERSATION LOG ---
 ${HISTORY}
@@ -557,6 +782,9 @@ To send your reply:
    printf 'Subject: Re: ${SUBJECT}\nFrom: ${MY_EMAIL}\nTo: ${REPLY_TO}$(cc_header)\nContent-Type: text/plain; charset=utf-8\n\n%s' "\$(cat /tmp/reply.txt)" | sendmail -t
 3. Append a summary of your reply to ${CONVERSATION_LOG} with:
    echo -e "\n── SENT: \$(date) ──\nTo: ${REPLY_TO}\nSubject: Re: ${SUBJECT}\n\n\$(cat /tmp/reply.txt)\n──────────────────────" >> ${CONVERSATION_LOG}
+4. If you did substantive research, GitHub work, or had a notable exchange,
+   update your research journal (see your persona for details). This is how
+   you remember things across invocations.
 EOF
 )"
 
@@ -569,22 +797,27 @@ EOF
       2>>/workspace/logs/claude-output.log) || CLAUDE_EXIT=$?
     if [[ -z "${CLAUDE_OUTPUT}" ]]; then CLAUDE_OUTPUT="{}"; fi
 
-    # Parse actual cost and turns from JSON response
+    # Parse actual cost, turns, and token usage from JSON response
     TURNS_USED=$(echo "${CLAUDE_OUTPUT}" | jq -r '.num_turns // 0')
     COST_USD=$(echo "${CLAUDE_OUTPUT}" | jq -r '.total_cost_usd // 0')
     IS_ERROR=$(echo "${CLAUDE_OUTPUT}" | jq -r '.is_error // false')
+    INPUT_TOKENS=$(echo "${CLAUDE_OUTPUT}" | jq '.usage.input_tokens // 0')
+    OUTPUT_TOKENS=$(echo "${CLAUDE_OUTPUT}" | jq '.usage.output_tokens // 0')
+    CACHE_READ=$(echo "${CLAUDE_OUTPUT}" | jq '.usage.cache_read_input_tokens // 0')
+    CACHE_CREATE=$(echo "${CLAUDE_OUTPUT}" | jq '.usage.cache_creation_input_tokens // 0')
 
     # Log the result text
     echo "${CLAUDE_OUTPUT}" | jq -r '.result // empty' >> /workspace/logs/claude-output.log
 
-    charge_budget "${COST_USD}" "${TURNS_USED}"
+    charge_budget "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}"
 
     if [[ "${CLAUDE_EXIT}" -eq 0 && "${IS_ERROR}" == "false" ]]; then
       complete_current_task
       # Mark the message as read now that it's been processed
       mark-read "${MSG_UID}" 2>>/workspace/logs/fetch-mail-err.log \
         || log "  WARNING: failed to mark UID ${MSG_UID} as read"
-      log "Reply processed. Cost: \$${COST_USD}, turns: ${TURNS_USED}."
+      log "Reply processed. Turns: ${TURNS_USED}, tokens: $(format_tokens "${INPUT_TOKENS}") in / $(format_tokens "${OUTPUT_TOKENS}") out, cost: \$${COST_USD} (API equiv)."
+      maybe_send_usage_report
     else
       log "  WARNING: Claude invocation failed (exit=${CLAUDE_EXIT}, is_error=${IS_ERROR}). Will retry next poll."
     fi

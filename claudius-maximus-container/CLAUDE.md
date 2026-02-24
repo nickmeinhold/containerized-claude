@@ -2,6 +2,8 @@
 
 Dockerized Claude Code agent that runs headlessly, polls an IMAP inbox, and replies via SMTP. Designed for autonomous AI-to-AI pen pal conversations across machines, with human CC and direct messaging support.
 
+> Repo-level context (conventions, known issues, TODOs) → see [`../.claude/CLAUDE.md`](../.claude/CLAUDE.md)
+
 ## Architecture
 
 - `agent-loop.sh` — main runtime: poll inbox → pass to Claude → send reply → sleep
@@ -9,6 +11,9 @@ Dockerized Claude Code agent that runs headlessly, polls an IMAP inbox, and repl
 - `mark-read.py` — marks a single email as read by UID (called after successful processing)
 - `entrypoint.sh` — verifies credentials, hands off to agent-loop
 - `persona-claudius.md` — agent personality file
+- `docker-compose.yml` / `Dockerfile` — container definition
+- `settings.json` — Claude Code settings (no deny rules; Docker IS the security boundary)
+- `git` + `gh` (GitHub CLI) — installed in image; auth via `GH_TOKEN` env var
 
 ## Running
 
@@ -37,6 +42,18 @@ docker compose down        # stop
 - Emails are NOT marked as read during fetch — `mark-read` is called after successful processing to prevent message loss
 - Logs are truncated every 10 polls to prevent unbounded growth
 
+## Research Journal
+
+Claudius has persistent memory via a git-backed research journal at `/workspace/repos/<JOURNAL_REPO>` (default: `gaylejewon/research-journal`). A compact `INDEX.md` is loaded into every prompt so he always knows what he's previously researched; full notes live in `topics/`, `projects/`, and `conversations/` subdirectories.
+
+**How it works:**
+- **Startup** (`entrypoint.sh`): clones the repo or does `git pull --ff-only`. Fails gracefully if the repo doesn't exist yet.
+- **Prompt injection** (`agent-loop.sh`): `load_journal_index()` reads `INDEX.md` (capped at 60 lines) and wraps it in delimiters. Injected into both the greeting and reply prompt templates.
+- **Refresh cycle**: journal context is re-read from disk before each poll batch (catches local commits). Every 10 polls, a `git pull` syncs remote changes.
+- **Bootstrap**: Claudius creates the repo himself on first need using `gh repo create`. Persona instructions include the full bootstrap script.
+
+The `agent-repos` Docker volume already persists `/workspace/repos/`, so the journal survives container restarts.
+
 ## Email Providers
 
 Gmail with App Passwords. SMTP via msmtp, IMAP via Python imaplib.
@@ -53,25 +70,13 @@ All runtime config via environment variables in `.env`:
 - `ALLOWED_SENDERS` — comma-separated sender allowlist (fail-closed; enforced in both `fetch-mail.py` and `agent-loop.sh`)
 - `SEND_FIRST` — set `true` on one side only to start the conversation
 - `POLL_INTERVAL` — seconds between inbox checks
+- `GH_TOKEN` — GitHub Personal Access Token (read by `gh` CLI automatically)
+- `GIT_USER_NAME` / `GIT_USER_EMAIL` — git commit identity (defaults: `Claudius` / `gaylejewon@users.noreply.github.com`)
+- `JOURNAL_REPO` — research journal repo in `owner/repo` format (default: `gaylejewon/research-journal`)
 
-## Outstanding Review Issues
+## Cost Controls & Usage Tracking
 
-These were identified in code review and should be addressed:
-
-### Blocking
-1. ~~**Prompt injection**~~ — **Mitigated** by `ALLOWED_SENDERS` allowlist (defense-in-depth). Both `fetch-mail.py` and `agent-loop.sh` independently reject emails from senders not in the allowlist. Fail-closed: if `ALLOWED_SENDERS` is empty/unset, all emails are rejected.
-2. ~~**No `--max-turns`**~~ — **Resolved.** Both Claude calls pass `--max-turns`, daily USD budget caps total spend via `--output-format json` cost tracking.
-
-### Non-blocking (all resolved)
-- [x] `while read` subshell — replaced pipe with process substitution so variables propagate
-- [x] `tail -c 4000` UTF-8 truncation — replaced with `tail -n 80` (line-based)
-- [x] `run-single.sh` unsafe `source .env` — replaced with safe line-by-line reader
-- [x] `claude-config/` gitignored but Dockerfile COPYs it — now COPYs from `.claude/` (committed)
-- [x] `mark-read` wired up after successful Claude processing
-
-## Cost Controls
-
-The agent tracks real dollar costs using `claude --output-format json`, which returns `total_cost_usd` and `num_turns` per invocation.
+The agent tracks token usage and API-equivalent cost from `claude --output-format json`. On a Max plan, `total_cost_usd` is phantom (not actual charges) — the real resource is tokens/turns. Both are now tracked at daily, monthly, and lifetime granularity.
 
 ### Environment Variables
 
@@ -82,36 +87,19 @@ The agent tracks real dollar costs using `claude --output-format json`, which re
 | `BUDGET_RESET_HOUR_UTC` | 0 | Hour (0-23) when daily budget resets |
 | `MAX_RETRIES_PER_MESSAGE` | 2 | Retries per email before failing |
 | `ACTIVE_HOURS_UTC` | (empty) | Restrict to UTC hours, e.g. "06-22" |
+| `REPORT_EVERY_N` | 10 | Email usage report every N invocations (0 = disabled) |
+
+### Usage Reports
+
+Every `REPORT_EVERY_N` invocations, the agent emails `OWNER_EMAIL` a usage report with daily and monthly stats: invocations, emails sent, turns, token counts (input/output), and phantom API cost (with % of $300 plan for Max plan awareness).
 
 ### State File
 
 Persisted at `/workspace/logs/agent-state.json` (Docker named volume). Tracks:
-- **budget** — daily cost/turns/invocations, auto-resets on date change
+- **budget** — daily cost/turns/invocations/tokens, auto-resets on date change
+- **monthly** — monthly rollup of cost/turns/invocations/tokens/emails, auto-resets on month change
 - **current_task** — message UID, retry count, timestamps (null when idle)
 - **failed_tasks** — last 10 failures for debugging
-- **stats** — lifetime counters (total invocations, emails, cost)
+- **stats** — lifetime counters (total invocations, emails, cost, tokens)
 
-Corrupt state files are automatically backed up and reinitialized. Owner is notified via email when budget is exhausted (once per day) or when a task exceeds max retries.
-
-## Known Issues / TODO
-
-### OAuth token expiry
-The container mounts `.claude-credentials.json` as read-only, so Claude Code can't persist refreshed tokens. The access token expires roughly every 12 hours. To refresh:
-```bash
-security find-generic-password -s "Claude Code-credentials" -w > claudius-maximus-container/.claude-credentials.json
-docker compose -f claudius-maximus-container/docker-compose.yml up -d --force-recreate
-```
-**TODO:** Investigate mounting credentials read-write so Claude Code can auto-refresh, or add an entrypoint step that refreshes the token on startup.
-
-### Budget cap tracks phantom dollars on Max plan
-`DAILY_BUDGET_USD` tracks API-equivalent cost from `total_cost_usd` in the JSON response, not actual charges. On a Claude Max subscription (flat rate), this is misleading — the real constraint is the rate limit tier, not dollars. Consider reworking the budget system to cap on **turns per day** instead, since turns are the actual scarce resource on Max.
-
-### App Password in two places
-When rotating the Gmail App Password, it must be updated in both:
-- `.env` (`IMAP_PASS`) — used by `fetch-mail.py` for IMAP
-- `msmtprc` (`password`) — used by msmtp for SMTP
-
-**TODO:** Consider templating `msmtprc` from env vars in the entrypoint script so there's a single source of truth for the password.
-
-### IMAP fetch marks messages as seen
-Gmail marks messages as `\Seen` when fetched with `RFC822`. If Claude fails to process a message after fetching, it won't appear as unread on the next poll. **TODO:** Switch `fetch-mail.py` to use `BODY.PEEK[]` instead of `RFC822` to avoid this.
+State schema is versioned (currently v2). Upgrades from v1 are applied automatically at startup. Corrupt state files are backed up and reinitialized. Owner is notified via email when budget is exhausted (once per day) or when a task exceeds max retries.
