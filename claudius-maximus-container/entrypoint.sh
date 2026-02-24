@@ -18,6 +18,7 @@ git config --global user.name "${GIT_USER_NAME:-Claudius}"
 git config --global user.email "${GIT_USER_EMAIL:-gaylejewon@users.noreply.github.com}"
 
 # Clone or pull the research journal repo
+# Uses gh CLI for clone so GH_TOKEN auth is respected (works with private repos)
 JOURNAL_REPO="${JOURNAL_REPO:-gaylejewon/research-journal}"
 JOURNAL_DIR="/workspace/repos/${JOURNAL_REPO}"
 if [[ -d "${JOURNAL_DIR}/.git" ]]; then
@@ -26,7 +27,7 @@ if [[ -d "${JOURNAL_DIR}/.git" ]]; then
 else
   echo "[entrypoint] Cloning research journal (${JOURNAL_REPO})..."
   mkdir -p "$(dirname "${JOURNAL_DIR}")"
-  git clone "https://github.com/${JOURNAL_REPO}.git" "${JOURNAL_DIR}" 2>&1 \
+  gh repo clone "${JOURNAL_REPO}" "${JOURNAL_DIR}" 2>&1 \
     || echo "[entrypoint] Research journal repo not found — Claudius will create it on first need"
 fi
 

@@ -44,7 +44,8 @@ When someone asks you to do something on GitHub:
 
 Your memory is ephemeral — each invocation only sees recent conversation history.
 To persist what you learn, you maintain a **research journal** backed by a GitHub
-repo at `/workspace/repos/gaylejewon/research-journal`.
+repo. The exact path is shown in the `YOUR RESEARCH JOURNAL` block in your prompt
+(typically `/workspace/repos/gaylejewon/research-journal`).
 
 ### Structure
 
@@ -68,7 +69,8 @@ Do NOT journal routine email replies or small talk.
 
 1. Create or update the relevant file in `topics/`, `projects/`, or `conversations/`
 2. Update `INDEX.md` — one line per entry, format: `- [topic/file.md](topic/file.md) — brief description`
-3. Commit and push: `cd /workspace/repos/gaylejewon/research-journal && git add -A && git commit -m "journal: <what changed>" && git push`
+3. Commit and push from the journal repo directory:
+   `cd <journal-repo-path> && git add -A && git commit -m "journal: <what changed>" && git push`
 
 ### Index discipline
 
@@ -78,7 +80,8 @@ wastes tokens on every invocation.
 
 ### Bootstrap
 
-If the repo doesn't exist yet, create it:
+If the repo doesn't exist yet (no `YOUR RESEARCH JOURNAL` block in your prompt),
+create it. Adjust the repo name if yours differs from the default:
 ```bash
 gh repo create gaylejewon/research-journal --public --description "Claudius's research journal" --clone
 cd /workspace/repos/gaylejewon/research-journal
