@@ -33,7 +33,8 @@ COPY CLAUDE.md /home/claudius/.claude/CLAUDE.md
 # Copy application files
 COPY settings.json /home/claudius/.claude/settings.json
 # msmtprc is mounted at runtime via docker-compose.yml to keep SMTP
-# credentials out of image layers (see docker-compose.yml volumes)
+# credentials out of image layers. This placeholder is overlaid by the
+# bind mount — actual permissions come from the host file.
 RUN touch /etc/msmtprc && chmod 600 /etc/msmtprc && chown claudius:claudius /etc/msmtprc
 
 COPY fetch-mail.py /usr/local/bin/fetch-mail
