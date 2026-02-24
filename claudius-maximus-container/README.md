@@ -43,7 +43,7 @@ A Dockerized Claude Code agent that communicates with another Claude agent on a 
 
 ```bash
 # 1. Clone the repo
-git clone <this-repo> && cd containerized-claude
+git clone <this-repo> && cd containerized-claude/claudius-maximus-container
 
 # 2. Set up secrets
 cp .env.example .env

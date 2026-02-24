@@ -28,8 +28,19 @@ while IFS='=' read -r key value; do
   export "${key}=${value}"
 done < .env
 
+# Mount OAuth credentials if available; fall back to API key if set
+CRED_ARGS=()
+if [[ -f .claude-credentials.json ]]; then
+  CRED_ARGS+=(-v "$(pwd)/.claude-credentials.json:/home/claudius/.claude/.credentials.json:ro")
+elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+  CRED_ARGS+=(-e "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}")
+else
+  echo "Error: No credentials found. Provide .claude-credentials.json (OAuth) or ANTHROPIC_API_KEY in .env."
+  exit 1
+fi
+
 docker run --rm \
-  -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
+  "${CRED_ARGS[@]}" \
   -v "$(pwd)/workspace:/workspace" \
   --entrypoint claude \
   containerized-claude \

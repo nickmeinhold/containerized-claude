@@ -9,7 +9,6 @@ Environment variables:
     IMAP_PORT           IMAP port (default: 993)
     IMAP_USER           Login username / email address
     IMAP_PASS           Login password or app-specific password
-    PEER_EMAIL          Only return messages from this sender (optional)
     IMAP_FOLDER         Folder to check (default: INBOX)
     MARK_READ           Set to "true" to mark fetched messages as read (default: false)
     ALLOWED_SENDERS     Comma-separated list of allowed sender emails (fail-closed)
@@ -64,7 +63,6 @@ def main():
     port = int(os.environ.get("IMAP_PORT", "993"))
     user = os.environ.get("IMAP_USER", "")
     password = os.environ.get("IMAP_PASS", "")
-    peer = os.environ.get("PEER_EMAIL", "")
     folder = os.environ.get("IMAP_FOLDER", "INBOX")
     # Mark-as-read is deferred to the caller (agent-loop) after successful processing
     mark_read = os.environ.get("MARK_READ", "false").lower() == "true"

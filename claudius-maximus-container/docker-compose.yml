@@ -14,7 +14,9 @@ services:
     volumes:
       # OAuth credentials (extracted from macOS Keychain)
       # On Linux, Claude Code reads from ~/.claude/.credentials.json (plaintext store)
-      - ./.claude-credentials.json:/home/claudius/.claude/.credentials.json
+      - ./.claude-credentials.json:/home/claudius/.claude/.credentials.json:ro
+      # SMTP credentials — mounted at runtime to keep out of image layers
+      - ./msmtprc:/etc/msmtprc:ro
       # Persist conversation logs across container restarts
       - agent-logs:/workspace/logs
 
