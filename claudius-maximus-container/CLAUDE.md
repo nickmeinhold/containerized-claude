@@ -74,32 +74,51 @@ All runtime config via environment variables in `.env`:
 - `GIT_USER_NAME` / `GIT_USER_EMAIL` — git commit identity (defaults: `Claudius` / `gaylejewon@users.noreply.github.com`)
 - `JOURNAL_REPO` — research journal repo in `owner/repo` format (default: `gaylejewon/research-journal`)
 
-## Cost Controls & Usage Tracking
+## Usage Controls & Turn-Based Pacing
 
-The agent tracks token usage and API-equivalent cost from `claude --output-format json`. On a Max plan, `total_cost_usd` is phantom (not actual charges) — the real resource is tokens/turns. Both are now tracked at daily, monthly, and lifetime granularity.
+On a Max plan, `total_cost_usd` from Claude's JSON output is phantom — there are no per-token charges. The real constraint is a **weekly turn quota** that resets on a fixed schedule. The agent uses turn-based pacing that auto-distributes remaining turns evenly across remaining days until the quota resets.
+
+### Auto-Pacing Algorithm
+
+```
+remaining_turns = WEEKLY_TURN_QUOTA - weekly.turns_used
+days_until_reset = fractional days to next reset boundary
+daily_allowance  = ceil(remaining_turns / ceil(days_until_reset))
+```
+
+Two-level enforcement:
+- **HARD STOP:** `weekly.turns_used >= WEEKLY_TURN_QUOTA` → pause until weekly reset
+- **SOFT STOP:** `budget.turns_used (today) >= daily_allowance` → pause until tomorrow
+
+Self-correcting: heavy early use → tighter daily allowance for remaining days. Light use → more generous allowance.
 
 ### Environment Variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `MAX_TURNS` | 25 | Max API round-trips per invocation |
-| `DAILY_BUDGET_USD` | 5.00 | Daily spend cap (0 = disabled) |
-| `BUDGET_RESET_HOUR_UTC` | 0 | Hour (0-23) when daily budget resets |
+| `WEEKLY_TURN_QUOTA` | 1000 | Total turns per weekly period (0 = disabled) |
+| `QUOTA_RESET_DAY` | 4 | ISO weekday for reset: 1=Mon..7=Sun (4=Thu) |
+| `QUOTA_RESET_HOUR_UTC` | 6 | Hour (0-23 UTC) when weekly quota resets |
 | `MAX_RETRIES_PER_MESSAGE` | 2 | Retries per email before failing |
 | `ACTIVE_HOURS_UTC` | (empty) | Restrict to UTC hours, e.g. "06-22" |
 | `REPORT_EVERY_N` | 10 | Email usage report every N invocations (0 = disabled) |
 
 ### Usage Reports
 
-Every `REPORT_EVERY_N` invocations, the agent emails `OWNER_EMAIL` a usage report with daily and monthly stats: invocations, emails sent, turns, token counts (input/output), and phantom API cost (with % of $300 plan for Max plan awareness).
+Every `REPORT_EVERY_N` invocations, the agent emails `OWNER_EMAIL` a usage report with:
+- **Today**: invocations, turns used vs daily pace allowance, token counts
+- **This week**: turns used/remaining vs quota, days until reset, daily pace rate
+- **This month**: invocations, emails, turns, tokens, phantom API cost
 
 ### State File
 
 Persisted at `/workspace/logs/agent-state.json` (Docker named volume). Tracks:
-- **budget** — daily cost/turns/invocations/tokens, auto-resets on date change
+- **budget** — daily cost/turns/invocations/tokens, auto-resets at midnight UTC
+- **weekly** — weekly turns/invocations/tokens/emails, auto-resets at the configured weekly boundary
 - **monthly** — monthly rollup of cost/turns/invocations/tokens/emails, auto-resets on month change
 - **current_task** — message UID, retry count, timestamps (null when idle)
 - **failed_tasks** — last 10 failures for debugging
 - **stats** — lifetime counters (total invocations, emails, cost, tokens)
 
-State schema is versioned (currently v2). Upgrades from v1 are applied automatically at startup. Corrupt state files are backed up and reinitialized. Owner is notified via email when budget is exhausted (once per day) or when a task exceeds max retries.
+State schema is versioned (currently v3). Upgrades from v1→v2→v3 are applied automatically at startup. Corrupt state files are backed up and reinitialized. Owner is notified via email when quota is exhausted (once per day, with distinct messages for daily pace vs weekly hard stop) or when a task exceeds max retries.
