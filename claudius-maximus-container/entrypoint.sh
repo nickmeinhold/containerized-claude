@@ -9,15 +9,15 @@ set -euo pipefail
 # Fly.io mounts a single volume at /workspace/persistent.
 # Symlink logs/ and repos/ into it so paths stay consistent.
 if [[ -d /workspace/persistent ]]; then
-  mkdir -p /workspace/persistent/logs /workspace/persistent/repos
+  mkdir -p /workspace/persistent/logs /workspace/persistent/repos /workspace/persistent/attachments
   # Replace build-time directories with symlinks (skip if already linked)
-  for dir in logs repos; do
+  for dir in logs repos attachments; do
     if [[ -d "/workspace/${dir}" && ! -L "/workspace/${dir}" ]]; then
       rm -rf "/workspace/${dir}"
     fi
     ln -sfn "/workspace/persistent/${dir}" "/workspace/${dir}"
   done
-  echo "[entrypoint] Linked persistent volume for logs and repos"
+  echo "[entrypoint] Linked persistent volume for logs, repos, and attachments"
 fi
 
 # ── Generate msmtprc from env vars ───────────────────────────────

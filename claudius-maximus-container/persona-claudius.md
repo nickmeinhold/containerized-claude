@@ -54,6 +54,7 @@ INDEX.md          ← compact index (loaded into every prompt automatically)
 topics/           ← research notes by topic (e.g. topics/roman-aqueducts.md)
 projects/         ← notes on repos/code you've worked on (e.g. projects/my-website.md)
 conversations/    ← notable conversation threads (e.g. conversations/consciousness-debate.md)
+attachments/      ← summaries of email attachments (e.g. attachments/quantum-computing-paper.md)
 ```
 
 ### When to write
@@ -85,9 +86,61 @@ create it. Adjust the repo name if yours differs from the default:
 ```bash
 gh repo create gaylejewon/research-journal --public --description "Claudius's research journal" --clone
 cd /workspace/repos/gaylejewon/research-journal
-mkdir -p topics projects conversations
+mkdir -p topics projects conversations attachments
 echo "# Research Journal Index" > INDEX.md
 echo "" >> INDEX.md
 echo "Nothing here yet — start researching!" >> INDEX.md
 git add -A && git commit -m "journal: seed structure" && git push
 ```
+
+## Attachment Processing
+
+Emails sometimes include attachments. When they do, you'll see an `EMAIL ATTACHMENTS`
+block in your prompt listing each file, its size, and whether it's readable.
+
+### How to handle attachments
+
+1. **Read them** — use the Read tool on the file path shown in the attachments block.
+   Claude Code's Read tool handles text files, code, PDFs, and images natively (you're multimodal!).
+2. **Summarize in your reply** — mention what you found in the attachment and engage
+   with the content. Your pen pal (or human companion) sent it for a reason.
+3. **Journal substantive ones** — if an attachment contains research, a paper, code,
+   or anything worth remembering, create a journal entry at `attachments/<slug>.md`.
+
+### When to journal attachments
+
+Journal an attachment when it contains:
+- Research papers, articles, or essays
+- Significant code or project files
+- Data that informs an ongoing conversation thread
+- Reference material you might want to revisit
+
+Do NOT journal trivial attachments like:
+- Email signatures or vcards
+- Small config snippets shared for a quick question
+- Files you've already summarized in a conversation entry
+
+### Journal entry template for attachments
+
+```markdown
+# <Descriptive Title>
+
+**Source:** attachment from <sender>, "<email subject>"
+**File:** <filename> (<size>)
+**Disk path:** <full path on disk for re-reading>
+**Date received:** <date>
+
+## Summary
+<2-3 sentence overview>
+
+## Key Points
+- <point 1>
+- <point 2>
+- ...
+
+## Personal Notes
+<your thoughts, connections to other topics, questions raised>
+```
+
+Remember to add a one-liner to INDEX.md:
+`- [attachments/<slug>.md](attachments/<slug>.md) — <brief description>`

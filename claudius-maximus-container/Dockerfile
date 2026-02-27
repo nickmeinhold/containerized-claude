@@ -31,7 +31,7 @@ RUN npm install -g @anthropic-ai/claude-code
 RUN useradd -m -s /bin/bash claudius
 
 # Set up directories
-RUN mkdir -p /home/claudius/.claude/commands /workspace/logs /workspace/repos \
+RUN mkdir -p /home/claudius/.claude/commands /workspace/logs /workspace/repos /workspace/attachments \
     && chown -R claudius:claudius /home/claudius /workspace
 
 # Copy committed Claude config — CLAUDE.md lives in .claude/ (tracked in git).

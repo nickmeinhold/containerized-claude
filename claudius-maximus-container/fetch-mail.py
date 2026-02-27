@@ -12,6 +12,8 @@ Environment variables:
     IMAP_FOLDER         Folder to check (default: INBOX)
     MARK_READ           Set to "true" to mark fetched messages as read (default: false)
     ALLOWED_SENDERS     Comma-separated list of allowed sender emails (fail-closed)
+    ATTACHMENT_DIR      Directory to save attachments (default: /workspace/attachments)
+    MAX_ATTACHMENT_SIZE Max attachment size in bytes (default: 5242880 = 5MB)
 """
 
 import email
@@ -21,6 +23,7 @@ import email.utils
 import imaplib
 import json
 import os
+import re
 import sys
 
 
@@ -34,6 +37,173 @@ def decode_header(raw: str) -> str:
         else:
             decoded.append(data)
     return " ".join(decoded)
+
+
+def sanitize_filename(raw: str) -> str:
+    """Decode an RFC 2047 filename, strip path components, and make filesystem-safe.
+
+    Guards against directory traversal (../../etc/passwd) and special characters.
+    Truncates to 100 chars to avoid filesystem limits.
+    """
+    # Decode RFC 2047 encoding (=?utf-8?B?...?=)
+    decoded = decode_header(raw) if raw else "attachment"
+    # Strip any path components (directory traversal protection)
+    decoded = os.path.basename(decoded)
+    # Replace anything that isn't alphanumeric, dot, hyphen, or underscore
+    decoded = re.sub(r"[^\w.\-]", "_", decoded)
+    # Collapse runs of underscores
+    decoded = re.sub(r"_+", "_", decoded).strip("_")
+    # Truncate to 100 chars (preserving extension)
+    if len(decoded) > 100:
+        name, _, ext = decoded.rpartition(".")
+        if ext and len(ext) <= 10:
+            decoded = name[: 100 - len(ext) - 1] + "." + ext
+        else:
+            decoded = decoded[:100]
+    return decoded or "attachment"
+
+
+# Extensions and MIME types that Claude can meaningfully process.
+# Claude Code's Read tool is multimodal — it handles text, PDFs, and images natively.
+PROCESSABLE_EXTENSIONS = {
+    # Text and code
+    ".txt", ".md", ".csv", ".json", ".xml", ".yaml", ".yml", ".toml",
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".scss",
+    ".sh", ".bash", ".zsh", ".fish",
+    ".c", ".cpp", ".h", ".hpp", ".java", ".go", ".rs", ".rb", ".php",
+    ".sql", ".r", ".m", ".swift", ".kt", ".scala", ".lua",
+    ".ini", ".cfg", ".conf", ".env", ".properties",
+    ".tex", ".bib", ".rst", ".org", ".adoc",
+    ".log", ".diff", ".patch",
+    # Documents
+    ".pdf",
+    # Images (Claude Code reads these visually)
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico",
+}
+
+PROCESSABLE_MIME_PREFIXES = ("text/", "image/")
+
+
+def is_processable(filename: str, content_type: str) -> bool:
+    """Return True if the attachment is something Claude can meaningfully process.
+
+    Covers text files, code, PDFs, and images — all formats that Claude Code's
+    multimodal Read tool can handle natively.
+    """
+    ext = os.path.splitext(filename)[1].lower()
+    if ext in PROCESSABLE_EXTENSIONS:
+        return True
+    if any(content_type.startswith(p) for p in PROCESSABLE_MIME_PREFIXES):
+        return True
+    if content_type == "application/pdf":
+        return True
+    return False
+
+
+def get_attachments(
+    msg: email.message.Message,
+    uid: str,
+    attachment_dir: str,
+    max_size: int,
+) -> list[dict]:
+    """Walk MIME parts, save processable attachments to disk, return metadata.
+
+    Saves files to <attachment_dir>/<uid>/<filename>. Handles filename
+    collisions within the same email by appending a counter suffix.
+
+    Returns a list of dicts with: filename, content_type, size, processable,
+    path (on disk, only for processable), and skipped_reason.
+    """
+    attachments = []
+    seen_names: dict[str, int] = {}  # track filenames for collision handling
+
+    for part in msg.walk():
+        # Skip multipart containers — they're just wrappers
+        if part.get_content_maintype() == "multipart":
+            continue
+
+        disposition = str(part.get("Content-Disposition", ""))
+        filename_raw = part.get_filename()
+
+        # Only consider parts that are actual attachments (have a filename
+        # or explicit attachment disposition). Inline text/plain is the email
+        # body — handled by get_body().
+        if not filename_raw and "attachment" not in disposition:
+            continue
+
+        content_type = part.get_content_type()
+        filename = sanitize_filename(filename_raw or f"unnamed.{content_type.split('/')[-1]}")
+
+        # Handle filename collisions within the same email
+        if filename in seen_names:
+            seen_names[filename] += 1
+            name, dot, ext = filename.rpartition(".")
+            if dot:
+                filename = f"{name}_{seen_names[filename]}.{ext}"
+            else:
+                filename = f"{filename}_{seen_names[filename]}"
+        else:
+            seen_names[filename] = 0
+
+        payload = part.get_payload(decode=True)
+        size = len(payload) if payload else 0
+
+        # Check for empty
+        if size == 0:
+            attachments.append({
+                "filename": filename,
+                "content_type": content_type,
+                "size": 0,
+                "processable": False,
+                "path": None,
+                "skipped_reason": "empty",
+            })
+            continue
+
+        # Check size limit
+        if size > max_size:
+            attachments.append({
+                "filename": filename,
+                "content_type": content_type,
+                "size": size,
+                "processable": False,
+                "path": None,
+                "skipped_reason": "too_large",
+            })
+            continue
+
+        processable = is_processable(filename, content_type)
+
+        if not processable:
+            attachments.append({
+                "filename": filename,
+                "content_type": content_type,
+                "size": size,
+                "processable": False,
+                "path": None,
+                "skipped_reason": "binary_type",
+            })
+            continue
+
+        # Save processable attachment to disk
+        uid_dir = os.path.join(attachment_dir, uid)
+        os.makedirs(uid_dir, exist_ok=True)
+        filepath = os.path.join(uid_dir, filename)
+
+        with open(filepath, "wb") as f:
+            f.write(payload)
+
+        attachments.append({
+            "filename": filename,
+            "content_type": content_type,
+            "size": size,
+            "processable": True,
+            "path": filepath,
+            "skipped_reason": None,
+        })
+        print(f"Saved attachment: {filepath} ({size} bytes)", file=sys.stderr)
+
+    return attachments
 
 
 def get_body(msg: email.message.Message) -> str:
@@ -67,6 +237,8 @@ def main():
     folder = os.environ.get("IMAP_FOLDER", "INBOX")
     # Mark-as-read is deferred to the caller (agent-loop) after successful processing
     mark_read = os.environ.get("MARK_READ", "false").lower() == "true"
+    attachment_dir = os.environ.get("ATTACHMENT_DIR", "/workspace/attachments")
+    max_attachment_size = int(os.environ.get("MAX_ATTACHMENT_SIZE", "5242880"))
 
     # Sender allowlist — fail-closed: if unset/empty, reject ALL emails
     allowed_raw = os.environ.get("ALLOWED_SENDERS", "").strip()
@@ -120,6 +292,9 @@ def main():
                 )
                 continue
 
+            # Extract and save attachments
+            attachments = get_attachments(msg, uid.decode(), attachment_dir, max_attachment_size)
+
             messages.append({
                 "uid": uid.decode(),
                 "from": sender,
@@ -127,6 +302,7 @@ def main():
                 "subject": subject,
                 "date": date,
                 "body": body.strip(),
+                "attachments": attachments,
             })
 
             # Mark as read so we don't process it again
