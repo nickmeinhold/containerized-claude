@@ -56,8 +56,8 @@ PERSISTENT_CRED="/workspace/persistent/claude-credentials.json"
 if [[ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]]; then
   if [[ -f "${PERSISTENT_CRED}" ]]; then
     # Compare refresh tokens: if different, operator pushed fresh creds
-    SECRET_RT=$(printf '%s' "${CLAUDE_CREDENTIALS_JSON}" | jq -r '.refreshToken // empty' 2>/dev/null)
-    PERSISTED_RT=$(jq -r '.refreshToken // empty' "${PERSISTENT_CRED}" 2>/dev/null)
+    SECRET_RT=$(printf '%s' "${CLAUDE_CREDENTIALS_JSON}" | jq -r '.claudeAiOauth.refreshToken // .refreshToken // empty' 2>/dev/null)
+    PERSISTED_RT=$(jq -r '.claudeAiOauth.refreshToken // .refreshToken // empty' "${PERSISTENT_CRED}" 2>/dev/null)
     if [[ -n "${SECRET_RT}" && "${SECRET_RT}" != "${PERSISTED_RT}" ]]; then
       echo "[entrypoint] Secret has newer credentials — updating persisted file"
       printf '%s\n' "${CLAUDE_CREDENTIALS_JSON}" > "${PERSISTENT_CRED}"
