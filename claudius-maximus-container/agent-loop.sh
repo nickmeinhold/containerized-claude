@@ -31,6 +31,8 @@ REPORT_EVERY_N="${REPORT_EVERY_N:-10}"
 STATE_FILE="/workspace/logs/agent-state.json"
 JOURNAL_REPO="${JOURNAL_REPO:-gaylejewon/research-journal}"
 JOURNAL_DIR="/workspace/repos/${JOURNAL_REPO}"
+ARCHIVE_REPO="${ARCHIVE_REPO:-}"
+ARCHIVE_DIR="/workspace/repos/${ARCHIVE_REPO}"
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -819,7 +821,7 @@ EOF
     else
       log "token-refresh: Refresh failed on greeting — notifying owner"
       notify_owner "OAuth refresh failed" \
-        "Token refresh failed during greeting. Manual intervention needed.\n\nExtract fresh credentials and push:\n  ./deploy-fly.sh --secrets"
+        $'Token refresh failed during greeting. Manual intervention needed.\n\nExtract fresh credentials and push:\n  ./deploy-fly.sh --secrets'
     fi
   fi
 
@@ -1042,7 +1044,7 @@ EOF
       else
         log "token-refresh: Refresh failed — notifying owner"
         notify_owner "OAuth refresh failed" \
-          "Token refresh failed while processing: ${SUBJECT}\n\nManual intervention needed. Extract fresh credentials and push:\n  ./deploy-fly.sh --secrets"
+          "Token refresh failed while processing: ${SUBJECT}"$'\n\nManual intervention needed. Extract fresh credentials and push:\n  ./deploy-fly.sh --secrets'
       fi
     fi
 

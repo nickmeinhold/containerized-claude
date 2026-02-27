@@ -84,7 +84,7 @@ refresh_token() {
     '{grant_type: $grant_type, refresh_token: $refresh_token, client_id: $client_id}')
 
   local response http_code
-  response=$(curl -s -w "\n%{http_code}" \
+  response=$(curl -s --max-time 10 -w "\n%{http_code}" \
     -X POST "${OAUTH_TOKEN_URL}" \
     -H "Content-Type: application/json" \
     -d "${request_body}" \
@@ -169,7 +169,7 @@ is_auth_error() {
   if echo "${result_text}" | grep -qi "token.*expired"; then
     return 0
   fi
-  if echo "${result_text}" | grep -qi "unauthorized"; then
+  if echo "${result_text}" | grep -q "Unauthorized\|401"; then
     return 0
   fi
   if echo "${result_text}" | grep -qi "authentication.*failed"; then
