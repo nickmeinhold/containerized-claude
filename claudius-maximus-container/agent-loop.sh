@@ -713,6 +713,7 @@ log "  Max turns:      ${MAX_TURNS}/invocation"
 log "  Weekly quota:   ${WEEKLY_TURN_QUOTA} turns (reset: day ${QUOTA_RESET_DAY} @ ${QUOTA_RESET_HOUR_UTC}:00 UTC)"
 log "  Usage report:   every ${REPORT_EVERY_N} invocations (0=disabled)"
 log "  Active hours: ${ACTIVE_HOURS_UTC:-always}"
+log "  Archive repo: ${ARCHIVE_REPO:-disabled}"
 log ""
 
 mkdir -p /workspace/logs
@@ -720,6 +721,8 @@ init_state
 
 # Source token refresh library (OAuth self-healing)
 source /usr/local/bin/token-refresh
+# Source email archive library (git-backed conversation archive)
+source /usr/local/bin/archive-email
 check_daily_reset
 check_weekly_reset
 check_monthly_reset
@@ -838,6 +841,9 @@ EOF
 
   charge_usage "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}"
 
+  # Archive the greeting email
+  archive_outgoing "${PEER_EMAIL}" "Hello from ${AGENT_NAME}"
+
   date > "${GREETING_SENT}"
   log "Opening message sent (or attempted). Turns: ${TURNS_USED}, tokens: $(format_tokens "${INPUT_TOKENS}") in / $(format_tokens "${OUTPUT_TOKENS}") out. Entering poll loop."
 fi
@@ -859,6 +865,12 @@ while true; do
     # Pull latest journal from remote
     if [[ -d "${JOURNAL_DIR}/.git" ]]; then
       git -C "${JOURNAL_DIR}" pull --ff-only 2>/dev/null || true
+    fi
+
+    # Push pending archive emails and pull remote changes
+    push_archive
+    if [[ -d "${ARCHIVE_DIR}/.git" ]]; then
+      git -C "${ARCHIVE_DIR}" pull --ff-only 2>/dev/null || true
     fi
   fi
 
@@ -967,6 +979,9 @@ ${BODY}
 ────────────────────────────────────────
 LOGENTRY
 
+    # Archive the incoming email
+    archive_incoming "${MSG_UID}" "${FROM}" "${REPLY_TO}" "${SUBJECT}" "${DATE}" "${BODY}"
+
     # Load conversation history for context
     HISTORY=""
     if [[ -f "${CONVERSATION_LOG}" ]]; then
@@ -1063,6 +1078,8 @@ EOF
     charge_usage "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}"
 
     if [[ "${CLAUDE_EXIT}" -eq 0 && "${IS_ERROR}" == "false" ]]; then
+      # Archive the outgoing reply
+      archive_outgoing "${REPLY_TO}" "Re: ${SUBJECT}" "${MSG_UID}"
       complete_current_task
       # Mark the message as read now that it's been processed
       mark-read "${MSG_UID}" 2>>/workspace/logs/fetch-mail-err.log \

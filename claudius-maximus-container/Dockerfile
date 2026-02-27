@@ -58,6 +58,12 @@ RUN chmod +x /usr/local/bin/agent-loop
 COPY token-refresh.sh /usr/local/bin/token-refresh
 RUN chmod +x /usr/local/bin/token-refresh
 
+COPY archive-email.sh /usr/local/bin/archive-email
+RUN chmod +x /usr/local/bin/archive-email
+
+COPY backfill-archive.py /usr/local/bin/backfill-archive
+RUN chmod +x /usr/local/bin/backfill-archive
+
 COPY persona-claudius.md /workspace/persona-claudius.md
 
 COPY entrypoint.sh /usr/local/bin/entrypoint

@@ -104,5 +104,23 @@ else
     || echo "[entrypoint] Research journal repo not found — Claudius will create it on first need"
 fi
 
+# Clone or pull the email archive repo (same pattern as journal)
+ARCHIVE_REPO="${ARCHIVE_REPO:-}"
+if [[ -n "${ARCHIVE_REPO}" ]]; then
+  ARCHIVE_DIR="/workspace/repos/${ARCHIVE_REPO}"
+  if [[ -d "${ARCHIVE_DIR}/.git" ]]; then
+    echo "[entrypoint] Pulling email archive (${ARCHIVE_REPO})..."
+    git -C "${ARCHIVE_DIR}" pull --ff-only 2>&1 || echo "[entrypoint] WARNING: archive pull failed — continuing with local copy"
+  else
+    echo "[entrypoint] Cloning email archive (${ARCHIVE_REPO})..."
+    mkdir -p "$(dirname "${ARCHIVE_DIR}")"
+    if ! gh repo clone "${ARCHIVE_REPO}" "${ARCHIVE_DIR}" 2>&1; then
+      echo "[entrypoint] Archive repo not found — will create on first archive"
+    fi
+  fi
+else
+  echo "[entrypoint] ARCHIVE_REPO not set — email archiving disabled"
+fi
+
 # Hand off to the agent loop
 exec agent-loop "$@"
