@@ -8,6 +8,8 @@ Dockerized Claude Code agent that runs headlessly, polls an IMAP inbox, and repl
 
 - `agent-loop.sh` — main runtime: poll inbox → pass to Claude → send reply → sleep
 - `token-refresh.sh` — OAuth token refresh library (sourced by agent-loop)
+- `archive-email.sh` — email archive library (sourced by agent-loop)
+- `backfill-archive.py` — one-time IMAP export for historical emails
 - `fetch-mail.py` — IMAP poller (Python stdlib only, UID-based)
 - `mark-read.py` — marks a single email as read by UID (called after successful processing)
 - `entrypoint.sh` — verifies credentials, hands off to agent-loop
@@ -122,6 +124,36 @@ Claudius has persistent memory via a git-backed research journal at `/workspace/
 
 The `agent-repos` Docker volume already persists `/workspace/repos/`, so the journal survives container restarts.
 
+## Email Archive
+
+Every email (incoming and outgoing) is saved as a markdown file with YAML frontmatter in a dedicated GitHub repo set by `ARCHIVE_REPO` (e.g., `gaylejewon/claudius-lyra-emails`). This provides a permanent, version-controlled, browseable record of all conversations.
+
+**Archive format:** Files are organized by `YYYY/MM/` and named with UTC timestamps:
+```
+2026/02/2026-02-24T083012Z-incoming-the-nature-of-consciousness.md
+2026/02/2026-02-24T084530Z-outgoing-re-the-nature-of-consciousness.md
+```
+
+Each file has YAML frontmatter with direction, UID, date, from/to, and subject.
+
+**How it works:**
+- **Startup** (`entrypoint.sh`): clones the repo via `gh`, or creates it as a private repo if it doesn't exist. Falls back gracefully if archiving is disabled (`ARCHIVE_REPO` empty).
+- **Incoming emails** (`agent-loop.sh`): `archive_incoming` writes a markdown file immediately after logging to `conversation.log`.
+- **Outgoing emails** (`agent-loop.sh`): `archive_outgoing` reads `/tmp/reply.txt` (where Claude writes its reply) and archives it after successful processing.
+- **Batch push**: `push_archive` commits and pushes every 10 polls (same cadence as journal sync). Not per-email, to avoid hammering GitHub.
+- **Graceful degradation**: if the repo is unavailable or `ARCHIVE_REPO` is unset, archiving is silently skipped. Email processing continues normally.
+
+**Backfill script** (`backfill-archive`): one-time Python script to import historical emails from Gmail IMAP. Fetches from both INBOX and `[Gmail]/Sent Mail`, deduplicates by UID against existing archive files. Safe to re-run.
+```bash
+# Preview what would be archived
+backfill-archive --dry-run
+
+# Run for real (then commit+push manually)
+backfill-archive
+cd /workspace/repos/<ARCHIVE_REPO>
+git add -A && git commit -m "backfill: historical emails" && git push
+```
+
 ## Email Providers
 
 Gmail with App Passwords. SMTP via msmtp, IMAP via Python imaplib.
@@ -141,6 +173,7 @@ All runtime config via environment variables in `.env`:
 - `GH_TOKEN` — GitHub Personal Access Token (read by `gh` CLI automatically)
 - `GIT_USER_NAME` / `GIT_USER_EMAIL` — git commit identity (defaults: `Claudius` / `gaylejewon@users.noreply.github.com`)
 - `JOURNAL_REPO` — research journal repo in `owner/repo` format (default: `gaylejewon/research-journal`)
+- `ARCHIVE_REPO` — email archive repo in `owner/repo` format (empty = disabled)
 
 ## Usage Controls & Turn-Based Pacing
 
