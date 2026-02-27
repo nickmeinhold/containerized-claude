@@ -574,9 +574,8 @@ maybe_send_usage_report() {
   fi
 
   # Gather daily stats
-  local d_inv d_cost d_turns d_in d_out d_emails
+  local d_inv d_turns d_in d_out d_emails
   d_inv=$(state_get '.budget.invocations')
-  d_cost=$(state_get '.budget.cost_usd')
   d_turns=$(state_get '.budget.turns_used')
   d_in=$(state_get '.budget.input_tokens')
   d_out=$(state_get '.budget.output_tokens')
@@ -600,10 +599,9 @@ maybe_send_usage_report() {
   fi
 
   # Gather monthly stats
-  local m_month m_inv m_cost m_turns m_in m_out m_emails
+  local m_month m_inv m_turns m_in m_out m_emails
   m_month=$(state_get '.monthly.month')
   m_inv=$(state_get '.monthly.invocations')
-  m_cost=$(state_get '.monthly.cost_usd')
   m_turns=$(state_get '.monthly.turns_used')
   m_in=$(state_get '.monthly.input_tokens')
   m_out=$(state_get '.monthly.output_tokens')
@@ -636,7 +634,6 @@ This month (${month_name}):
   Emails sent:  ${m_emails}
   Turns used:   ${m_turns}
   Tokens:       $(format_tokens "${m_in}") input / $(format_tokens "${m_out}") output
-  API equiv:    \$${m_cost} (phantom — Max plan, no actual charges)
 REPORT
   )
 
@@ -718,6 +715,9 @@ log ""
 
 mkdir -p /workspace/logs
 init_state
+
+# Source token refresh library (OAuth self-healing)
+source /usr/local/bin/token-refresh
 check_daily_reset
 check_weekly_reset
 check_monthly_reset
@@ -796,6 +796,7 @@ EOF
 )"
 
   log "Running Claude for opening message..."
+  ensure_valid_token
   CLAUDE_EXIT=0
   CLAUDE_OUTPUT=$(claude -p "${FIRST_MSG_PROMPT}" \
     --max-turns "${MAX_TURNS}" \
@@ -803,6 +804,24 @@ EOF
     --dangerously-skip-permissions \
     2>>/workspace/logs/claude-output.log) || CLAUDE_EXIT=$?
   if [[ -z "${CLAUDE_OUTPUT}" ]]; then CLAUDE_OUTPUT="{}"; fi
+
+  # Auth-aware retry for greeting: if token expired mid-flight, refresh and retry once
+  if is_auth_error "${CLAUDE_EXIT}" "${CLAUDE_OUTPUT}"; then
+    log "token-refresh: Auth error on greeting — refreshing and retrying..."
+    if refresh_token; then
+      CLAUDE_EXIT=0
+      CLAUDE_OUTPUT=$(claude -p "${FIRST_MSG_PROMPT}" \
+        --max-turns "${MAX_TURNS}" \
+        --output-format json \
+        --dangerously-skip-permissions \
+        2>>/workspace/logs/claude-output.log) || CLAUDE_EXIT=$?
+      if [[ -z "${CLAUDE_OUTPUT}" ]]; then CLAUDE_OUTPUT="{}"; fi
+    else
+      log "token-refresh: Refresh failed on greeting — notifying owner"
+      notify_owner "OAuth refresh failed" \
+        "Token refresh failed during greeting. Manual intervention needed.\n\nExtract fresh credentials and push:\n  ./deploy-fly.sh --secrets"
+    fi
+  fi
 
   # Parse actual cost, turns, and token usage from JSON response
   TURNS_USED=$(echo "${CLAUDE_OUTPUT}" | jq -r '.num_turns // 0')
@@ -998,6 +1017,7 @@ EOF
 )"
 
     log "Running Claude to compose reply..."
+    ensure_valid_token
     CLAUDE_EXIT=0
     CLAUDE_OUTPUT=$(claude -p "${REPLY_PROMPT}" \
       --max-turns "${MAX_TURNS}" \
@@ -1005,6 +1025,26 @@ EOF
       --dangerously-skip-permissions \
       2>>/workspace/logs/claude-output.log) || CLAUDE_EXIT=$?
     if [[ -z "${CLAUDE_OUTPUT}" ]]; then CLAUDE_OUTPUT="{}"; fi
+
+    # Auth-aware retry: if token expired mid-flight, refresh and retry once.
+    # This does NOT count against the task retry counter — auth failures are
+    # infrastructure issues, not processing failures.
+    if is_auth_error "${CLAUDE_EXIT}" "${CLAUDE_OUTPUT}"; then
+      log "token-refresh: Auth error on reply — refreshing and retrying..."
+      if refresh_token; then
+        CLAUDE_EXIT=0
+        CLAUDE_OUTPUT=$(claude -p "${REPLY_PROMPT}" \
+          --max-turns "${MAX_TURNS}" \
+          --output-format json \
+          --dangerously-skip-permissions \
+          2>>/workspace/logs/claude-output.log) || CLAUDE_EXIT=$?
+        if [[ -z "${CLAUDE_OUTPUT}" ]]; then CLAUDE_OUTPUT="{}"; fi
+      else
+        log "token-refresh: Refresh failed — notifying owner"
+        notify_owner "OAuth refresh failed" \
+          "Token refresh failed while processing: ${SUBJECT}\n\nManual intervention needed. Extract fresh credentials and push:\n  ./deploy-fly.sh --secrets"
+      fi
+    fi
 
     # Parse actual cost, turns, and token usage from JSON response
     TURNS_USED=$(echo "${CLAUDE_OUTPUT}" | jq -r '.num_turns // 0')

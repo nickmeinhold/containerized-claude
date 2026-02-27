@@ -7,6 +7,7 @@ Dockerized Claude Code agent that runs headlessly, polls an IMAP inbox, and repl
 ## Architecture
 
 - `agent-loop.sh` — main runtime: poll inbox → pass to Claude → send reply → sleep
+- `token-refresh.sh` — OAuth token refresh library (sourced by agent-loop)
 - `fetch-mail.py` — IMAP poller (Python stdlib only, UID-based)
 - `mark-read.py` — marks a single email as read by UID (called after successful processing)
 - `entrypoint.sh` — verifies credentials, hands off to agent-loop
@@ -32,19 +33,30 @@ docker compose down        # stop
 
 ### Fly.io (persistent cloud deployment)
 
+**Live deployment:** app `claudius-maximus` in Singapore (`sin`), `shared-cpu-1x` 512MB, 1GB encrypted volume. ~$3/mo.
+
+First-time setup (already done):
 ```bash
 cd claudius-maximus-container
-fly launch --no-deploy                                      # create app & pick region
-fly volumes create claudius_data --region <region> --size 1  # 1 GB persistent storage
+brew install flyctl && fly auth login
+fly launch --no-deploy --name claudius-maximus --region sin --copy-config
+fly volumes create claudius_data --region sin --size 1      # 1 GB persistent storage
 ./deploy-fly.sh                                             # push secrets & deploy
+fly machine update <id> --autostop=off --restart=always -y  # keep running 24/7
 ```
 
-After first deploy:
+Day-to-day operations:
 ```bash
-fly deploy           # redeploy after code changes
-fly logs             # tail logs
-fly ssh console      # shell into the machine
+fly logs                    # watch him think
+fly ssh console             # shell into the machine
+fly deploy                  # redeploy after code changes
+fly machine stop <id>       # pause him
+fly machine start <id>      # resume
+./deploy-fly.sh --secrets   # update secrets without redeploying
 ```
+
+Machine ID: `2873455c336358` | Volume: `vol_re8l97mdn7od5y3r`
+Dashboard: https://fly.io/apps/claudius-maximus
 
 The entrypoint auto-detects Fly.io (persistent volume at `/workspace/persistent`) and:
 - Symlinks `logs/` and `repos/` into the volume for persistence
@@ -59,6 +71,36 @@ See `fly.toml` and `deploy-fly.sh` for details.
 - **Fly.io**: Credentials set as `CLAUDE_CREDENTIALS_JSON` secret → written to file at startup
 - On macOS: `security find-generic-password -s "Claude Code-credentials" -w`
 - On Linux: Claude Code reads from `~/.claude/.credentials.json` (NOT `~/.claude.json`)
+
+## Token Refresh (OAuth Self-Healing)
+
+Claude Code does not refresh OAuth tokens in headless mode (`claude -p`). Access tokens expire every ~8 hours. The agent handles this automatically via `token-refresh.sh`:
+
+**How it works:**
+- **Proactive check** (`ensure_valid_token`): called before every Claude invocation. If the token expires within 30 minutes, refreshes it preemptively.
+- **Reactive retry** (`is_auth_error`): if Claude fails with an OAuth error, refreshes the token and retries once (doesn't count as a task retry).
+- **Atomic writes**: new tokens are written to a temp file then `mv`'d to prevent corruption from partial writes. Refresh tokens are **single-use** — the old one is invalidated after each refresh.
+- **Persistent credentials**: tokens are written to both `~/.claude/.credentials.json` (active) and `/workspace/persistent/claude-credentials.json` (survives container restarts).
+
+**Credential priority on startup** (`entrypoint.sh`):
+1. If `CLAUDE_CREDENTIALS_JSON` secret has a **different** refresh token than the persisted file → operator pushed fresh creds → use the secret
+2. If persisted file exists → use it (may contain tokens refreshed since last deploy)
+3. If only the secret exists → seed both persisted and active files
+4. Else → warn (bind-mount or API key path)
+
+**OAuth endpoint:** `POST https://console.anthropic.com/v1/oauth/token` with Claude Code's public client ID.
+
+**Manual fallback** (if refresh itself fails — e.g., refresh token revoked):
+```bash
+# On macOS: extract fresh credentials
+security find-generic-password -s "Claude Code-credentials" -w | pbcopy
+
+# Push to Fly.io
+cd claudius-maximus-container
+./deploy-fly.sh --secrets   # updates CLAUDE_CREDENTIALS_JSON
+```
+
+Owner is notified via email when token refresh fails, with manual fix instructions.
 
 ## Key Design Decisions
 

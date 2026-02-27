@@ -55,6 +55,9 @@ RUN chmod +x /usr/local/bin/mark-read
 COPY agent-loop.sh /usr/local/bin/agent-loop
 RUN chmod +x /usr/local/bin/agent-loop
 
+COPY token-refresh.sh /usr/local/bin/token-refresh
+RUN chmod +x /usr/local/bin/token-refresh
+
 COPY persona-claudius.md /workspace/persona-claudius.md
 
 COPY entrypoint.sh /usr/local/bin/entrypoint
