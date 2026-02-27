@@ -44,12 +44,39 @@ MSMTP
 fi
 
 # ── Claude credentials ────────────────────────────────────────────
+# Priority chain for OAuth credentials:
+#   1. If CLAUDE_CREDENTIALS_JSON has a DIFFERENT refresh token than the
+#      persisted file → operator pushed fresh creds → use the secret
+#   2. If persisted file exists → use it (may contain refreshed tokens)
+#   3. If secret exists → seed both persisted and active files
+#   4. Else → warn (bind-mount or API key path)
 CRED_FILE="${HOME}/.claude/.credentials.json"
+PERSISTENT_CRED="/workspace/persistent/claude-credentials.json"
 
-# Write credentials from env var (Fly.io secrets path)
 if [[ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]]; then
-  printf '%s\n' "${CLAUDE_CREDENTIALS_JSON}" > "${CRED_FILE}"
-  echo "[entrypoint] Wrote credentials from CLAUDE_CREDENTIALS_JSON"
+  if [[ -f "${PERSISTENT_CRED}" ]]; then
+    # Compare refresh tokens: if different, operator pushed fresh creds
+    SECRET_RT=$(printf '%s' "${CLAUDE_CREDENTIALS_JSON}" | jq -r '.refreshToken // empty' 2>/dev/null)
+    PERSISTED_RT=$(jq -r '.refreshToken // empty' "${PERSISTENT_CRED}" 2>/dev/null)
+    if [[ -n "${SECRET_RT}" && "${SECRET_RT}" != "${PERSISTED_RT}" ]]; then
+      echo "[entrypoint] Secret has newer credentials — updating persisted file"
+      printf '%s\n' "${CLAUDE_CREDENTIALS_JSON}" > "${PERSISTENT_CRED}"
+    fi
+    cp "${PERSISTENT_CRED}" "${CRED_FILE}"
+    echo "[entrypoint] Loaded credentials from persistent volume"
+  else
+    # First deploy: seed both from the secret
+    printf '%s\n' "${CLAUDE_CREDENTIALS_JSON}" > "${CRED_FILE}"
+    if [[ -d "/workspace/persistent" ]]; then
+      cp "${CRED_FILE}" "${PERSISTENT_CRED}"
+      echo "[entrypoint] Seeded persistent credentials from secret"
+    fi
+    echo "[entrypoint] Wrote credentials from CLAUDE_CREDENTIALS_JSON"
+  fi
+elif [[ -f "${PERSISTENT_CRED}" ]]; then
+  # No secret but persisted file exists (e.g., bind-mount was removed)
+  cp "${PERSISTENT_CRED}" "${CRED_FILE}"
+  echo "[entrypoint] Loaded credentials from persistent volume (no secret set)"
 fi
 
 if [[ -f "${CRED_FILE}" ]]; then
