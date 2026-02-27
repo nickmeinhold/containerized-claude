@@ -86,7 +86,7 @@ archive_incoming() {
   cat > "${filepath}" <<ARCHIVE
 ---
 direction: incoming
-message_uid: "${uid}"
+message_uid: "INBOX-${uid}"
 date: "${date}"
 from: "${from}"
 reply_to: "${reply_to}"

@@ -115,7 +115,12 @@ if [[ -n "${ARCHIVE_REPO}" ]]; then
     echo "[entrypoint] Cloning email archive (${ARCHIVE_REPO})..."
     mkdir -p "$(dirname "${ARCHIVE_DIR}")"
     if ! gh repo clone "${ARCHIVE_REPO}" "${ARCHIVE_DIR}" 2>&1; then
-      echo "[entrypoint] Archive repo not found — will create on first archive"
+      echo "[entrypoint] Archive repo not found — creating as private repo..."
+      if gh repo create "${ARCHIVE_REPO}" --private --description "Email archive" 2>&1; then
+        gh repo clone "${ARCHIVE_REPO}" "${ARCHIVE_DIR}" 2>&1 || true
+      else
+        echo "[entrypoint] WARNING: could not create archive repo — archiving will be disabled"
+      fi
     fi
   fi
 else

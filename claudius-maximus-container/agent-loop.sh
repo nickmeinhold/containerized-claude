@@ -841,8 +841,10 @@ EOF
 
   charge_usage "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}"
 
-  # Archive the greeting email
-  archive_outgoing "${PEER_EMAIL}" "Hello from ${AGENT_NAME}"
+  # Archive the greeting email (only if Claude succeeded)
+  if [[ "${CLAUDE_EXIT}" -eq 0 ]]; then
+    archive_outgoing "${PEER_EMAIL}" "Hello from ${AGENT_NAME}"
+  fi
 
   date > "${GREETING_SENT}"
   log "Opening message sent (or attempted). Turns: ${TURNS_USED}, tokens: $(format_tokens "${INPUT_TOKENS}") in / $(format_tokens "${OUTPUT_TOKENS}") out. Entering poll loop."

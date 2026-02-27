@@ -27,7 +27,6 @@ import email.header
 import email.message
 import email.utils
 import imaplib
-import json
 import os
 import re
 import sys
