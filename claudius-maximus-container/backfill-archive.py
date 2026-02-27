@@ -40,7 +40,11 @@ def decode_header(raw: str) -> str:
     decoded = []
     for data, charset in parts:
         if isinstance(data, bytes):
-            decoded.append(data.decode(charset or "utf-8", errors="replace"))
+            # Some emails use non-standard charset names like "unknown-8bit"
+            try:
+                decoded.append(data.decode(charset or "utf-8", errors="replace"))
+            except (LookupError, UnicodeDecodeError):
+                decoded.append(data.decode("utf-8", errors="replace"))
         else:
             decoded.append(data)
     return " ".join(decoded)
@@ -117,7 +121,9 @@ def fetch_folder(
 ) -> int:
     """Fetch all messages from a folder and write archive files."""
     try:
-        status, _ = conn.select(folder, readonly=True)
+        # Quote folder names containing spaces for IMAP protocol compatibility
+        imap_folder = f'"{folder}"' if " " in folder else folder
+        status, _ = conn.select(imap_folder, readonly=True)
         if status != "OK":
             print(f"  Could not select folder '{folder}' — skipping", file=sys.stderr)
             return 0
