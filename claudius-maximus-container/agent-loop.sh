@@ -33,6 +33,7 @@ JOURNAL_REPO="${JOURNAL_REPO:-gaylejewon/research-journal}"
 JOURNAL_DIR="/workspace/repos/${JOURNAL_REPO}"
 ARCHIVE_REPO="${ARCHIVE_REPO:-}"
 ARCHIVE_DIR="/workspace/repos/${ARCHIVE_REPO}"
+ATTACHMENT_DIR="${ATTACHMENT_DIR:-/workspace/attachments}"
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -697,6 +698,50 @@ ${content}${truncation_note}
 JRNL
 }
 
+# Build the ATTACHMENTS_CONTEXT block for Claude's prompt.
+# Reads the attachments array from a message JSON object and produces
+# a prompt section listing each file with its disk path and status.
+# Sets ATTACHMENTS_CONTEXT in the caller's scope (no subshell).
+# Usage: build_attachments_context "$MSG_JSON"
+build_attachments_context() {
+  local msg_json="$1"
+  ATTACHMENTS_CONTEXT=""
+
+  local att_count
+  att_count=$(echo "${msg_json}" | jq '.attachments | length // 0')
+  if [[ "${att_count}" -eq 0 ]]; then
+    return
+  fi
+
+  local lines=""
+  local i=0
+  while [[ "${i}" -lt "${att_count}" ]]; do
+    local filename size processable path skipped_reason
+    filename=$(echo "${msg_json}" | jq -r ".attachments[${i}].filename")
+    size=$(echo "${msg_json}" | jq -r ".attachments[${i}].size")
+    processable=$(echo "${msg_json}" | jq -r ".attachments[${i}].processable")
+    path=$(echo "${msg_json}" | jq -r ".attachments[${i}].path // empty")
+    skipped_reason=$(echo "${msg_json}" | jq -r ".attachments[${i}].skipped_reason // empty")
+
+    if [[ "${processable}" == "true" ]]; then
+      lines="${lines}
+- ${filename} (${size} bytes) — READABLE at: ${path}"
+    else
+      lines="${lines}
+- ${filename} (${size} bytes) — NOT READABLE (${skipped_reason})"
+    fi
+    i=$((i + 1))
+  done
+
+  ATTACHMENTS_CONTEXT="=== EMAIL ATTACHMENTS ===
+This email includes attachments. For readable files (text, code, PDFs, images),
+use the Read tool to view their contents. After reading, summarize key points
+in your reply. For substantive documents, consider journaling them to
+attachments/<slug>.md in your research journal.
+${lines}
+=== END ATTACHMENTS ==="
+}
+
 # ── Startup ──────────────────────────────────────────────────────
 
 check_required_vars
@@ -921,10 +966,12 @@ while true; do
     DATE=$(echo "${MSG}" | jq -r '.date')
     BODY=$(echo "${MSG}" | jq -r '.body')
 
+    ATT_COUNT=$(echo "${MSG}" | jq '.attachments | length // 0')
     log "  From: ${FROM}"
     log "  Reply-to: ${REPLY_TO}"
     log "  Subject: ${SUBJECT}"
     log "  Date: ${DATE}"
+    log "  Attachments: ${ATT_COUNT}"
     log "  Body preview: ${BODY:0:100}..."
 
     # Check sender against allowlist (case-insensitive)
@@ -955,6 +1002,11 @@ while true; do
     if [[ "${retries}" -ge "${MAX_RETRIES_PER_MESSAGE}" ]]; then
       log "  Skipping UID ${MSG_UID} — max retries (${MAX_RETRIES_PER_MESSAGE}) exceeded."
       fail_current_task "max_retries_exceeded"
+      # Clean up attachments for failed tasks (no point keeping them)
+      if [[ -d "${ATTACHMENT_DIR}/${MSG_UID}" ]]; then
+        rm -rf "${ATTACHMENT_DIR}/${MSG_UID}"
+        log "  Cleaned up attachments for failed UID ${MSG_UID}"
+      fi
       notify_owner "Task failed" "Could not process after ${MAX_RETRIES_PER_MESSAGE} retries: ${SUBJECT} from ${FROM}"
       mark-read "${MSG_UID}" 2>>/workspace/logs/fetch-mail-err.log || true
       continue
@@ -981,8 +1033,12 @@ ${BODY}
 ────────────────────────────────────────
 LOGENTRY
 
-    # Archive the incoming email
-    archive_incoming "${MSG_UID}" "${FROM}" "${REPLY_TO}" "${SUBJECT}" "${DATE}" "${BODY}"
+    # Archive the incoming email (with attachment metadata if present)
+    ATTACHMENTS_JSON=$(echo "${MSG}" | jq -c '.attachments // []')
+    archive_incoming "${MSG_UID}" "${FROM}" "${REPLY_TO}" "${SUBJECT}" "${DATE}" "${BODY}" "${ATTACHMENTS_JSON}"
+
+    # Build attachment context for Claude's prompt
+    build_attachments_context "${MSG}"
 
     # Load conversation history for context
     HISTORY=""
@@ -1014,6 +1070,8 @@ You just received this new email:
   From: ${FROM} (${REPLY_TO})
   Subject: ${SUBJECT}
   Body: ${BODY}
+
+${ATTACHMENTS_CONTEXT}
 
 Compose a thoughtful reply. Adapt your tone to who you're talking to:
 - If it's your AI pen pal, be intellectual, playful, and conversational.

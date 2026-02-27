@@ -63,13 +63,14 @@ init_archive_repo() {
 
 # ── archive_incoming ──────────────────────────────────────────
 # Write an incoming email to the archive as a markdown file.
-# Usage: archive_incoming <uid> <from> <reply_to> <subject> <date> <body>
+# Usage: archive_incoming <uid> <from> <reply_to> <subject> <date> <body> [attachments_json]
 archive_incoming() {
   if [[ -z "${ARCHIVE_REPO}" || ! -d "${ARCHIVE_DIR}/.git" ]]; then
     return 0
   fi
 
   local uid="$1" from="$2" reply_to="$3" subject="$4" date="$5" body="$6"
+  local attachments_json="${7:-}"
   local now_iso
   now_iso=$(date -u '+%Y-%m-%dT%H%M%SZ')
   local year_month
@@ -83,6 +84,18 @@ archive_incoming() {
   local filename="${now_iso}-incoming-${slug}.md"
   local filepath="${dir}/${filename}"
 
+  # Build optional attachments frontmatter field
+  local attachments_field=""
+  if [[ -n "${attachments_json}" && "${attachments_json}" != "[]" ]]; then
+    local att_list
+    att_list=$(echo "${attachments_json}" | jq -r '.[] | "  - \"" + .filename + "\" (" + (.size | tostring) + " bytes, " + (if .processable then "processed" else "skipped: " + (.skipped_reason // "unknown") end) + ")"' 2>/dev/null)
+    if [[ -n "${att_list}" ]]; then
+      attachments_field="
+attachments:
+${att_list}"
+    fi
+  fi
+
   cat > "${filepath}" <<ARCHIVE
 ---
 direction: incoming
@@ -91,7 +104,7 @@ date: "${date}"
 from: "${from}"
 reply_to: "${reply_to}"
 to: "${MY_EMAIL}"
-subject: "${subject}"
+subject: "${subject}"${attachments_field}
 archived_at: "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 ---
 

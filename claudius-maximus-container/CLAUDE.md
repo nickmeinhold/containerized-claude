@@ -154,6 +154,40 @@ cd /workspace/repos/<ARCHIVE_REPO>
 git add -A && git commit -m "backfill: historical emails" && git push
 ```
 
+## Email Attachments
+
+Email attachments (text, code, PDFs, and images) are extracted, saved to disk, and presented to Claude for reading via the multimodal Read tool. Unsupported binary types (zips, archives, executables) are noted in metadata but not processed.
+
+**Pipeline:**
+```
+Email with attachments
+  → fetch-mail.py: extract + save processable files to /workspace/attachments/<uid>/
+  → agent-loop.sh: build ATTACHMENTS_CONTEXT block → inject into prompt
+  → Claude: reads files via Read tool, summarizes in reply, journals to research-journal
+```
+
+**Progressive disclosure (3 levels):**
+1. **INDEX.md one-liner** — always loaded into prompt. Reminds Claudius an attachment exists.
+2. **Journal detail file** (`attachments/<slug>.md`) — summary, key points, personal notes.
+3. **Original file on disk** (`/workspace/attachments/<uid>/<filename>`) — full content for re-reading.
+
+**Safety measures:**
+- Filename sanitization: `os.path.basename()` + regex stripping of special chars (directory traversal protection)
+- Size limit: `MAX_ATTACHMENT_SIZE` (default 5MB) — files over this are skipped
+- Type filtering: text, code, PDFs, and images are saved; other binary types get metadata-only
+- Per-UID subdirectories prevent filename collisions across emails
+- Counter suffix handles collisions within the same email
+
+**Persistence:**
+- Docker Compose: `agent-attachments` named volume at `/workspace/attachments`
+- Fly.io: symlinked into `/workspace/persistent/attachments` on the encrypted volume
+
+**Environment variables:**
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `ATTACHMENT_DIR` | `/workspace/attachments` | Directory for saved attachment files |
+| `MAX_ATTACHMENT_SIZE` | `5242880` | Max size in bytes per attachment (5MB) |
+
 ## Email Providers
 
 Gmail with App Passwords. SMTP via msmtp, IMAP via Python imaplib.

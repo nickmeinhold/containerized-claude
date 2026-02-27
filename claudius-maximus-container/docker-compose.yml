@@ -22,9 +22,13 @@ services:
       - agent-logs:/workspace/logs
       # Persist cloned repos across container restarts
       - agent-repos:/workspace/repos
+      # Persist email attachments for Level 3 progressive disclosure
+      - agent-attachments:/workspace/attachments
 
 volumes:
   agent-logs:
     driver: local
   agent-repos:
+    driver: local
+  agent-attachments:
     driver: local
