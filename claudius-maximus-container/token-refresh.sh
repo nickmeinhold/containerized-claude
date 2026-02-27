@@ -32,7 +32,7 @@ token_needs_refresh() {
   fi
 
   local expires_at
-  expires_at=$(jq -r '.expiresAt // empty' "${CRED_FILE}" 2>/dev/null)
+  expires_at=$(jq -r '.claudeAiOauth.expiresAt // empty' "${CRED_FILE}" 2>/dev/null)
 
   if [[ -z "${expires_at}" ]]; then
     log "token-refresh: No expiresAt in credentials — assuming valid (API key?)"
@@ -66,7 +66,7 @@ refresh_token() {
   fi
 
   local current_refresh_token
-  current_refresh_token=$(jq -r '.refreshToken // empty' "${CRED_FILE}" 2>/dev/null)
+  current_refresh_token=$(jq -r '.claudeAiOauth.refreshToken // empty' "${CRED_FILE}" 2>/dev/null)
 
   if [[ -z "${current_refresh_token}" ]]; then
     log "token-refresh: Cannot refresh — no refreshToken in credentials"
@@ -122,7 +122,7 @@ refresh_token() {
     --arg at "${new_access_token}" \
     --arg rt "${new_refresh_token}" \
     --argjson ea "${new_expires_at}" \
-    '.accessToken = $at | .refreshToken = $rt | .expiresAt = $ea' \
+    '.claudeAiOauth.accessToken = $at | .claudeAiOauth.refreshToken = $rt | .claudeAiOauth.expiresAt = $ea' \
     "${CRED_FILE}" > "${tmp_cred}" && mv "${tmp_cred}" "${CRED_FILE}"
 
   # Also persist to the volume (survives container restarts on Fly.io)
