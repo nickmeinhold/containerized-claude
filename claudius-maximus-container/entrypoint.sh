@@ -20,6 +20,13 @@ if [[ -d /workspace/persistent ]]; then
   echo "[entrypoint] Linked persistent volume for logs, repos, and attachments"
 fi
 
+# ── Playwright session persistence ──────────────────────────────
+PLAYWRIGHT_STORAGE="/workspace/logs/playwright-storage.json"
+if [[ ! -f "${PLAYWRIGHT_STORAGE}" ]]; then
+  echo '{"cookies":[],"origins":[]}' > "${PLAYWRIGHT_STORAGE}"
+  echo "[entrypoint] Created empty Playwright storage state"
+fi
+
 # ── Generate msmtprc from env vars ───────────────────────────────
 # Single source of truth for SMTP password — no more duplicating it
 # in both .env and msmtprc. Falls back to the bind-mounted file if

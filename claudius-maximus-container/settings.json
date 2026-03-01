@@ -14,7 +14,7 @@
   "mcpServers": {
     "playwright": {
       "command": "playwright-mcp",
-      "args": ["--headless"],
+      "args": ["--headless", "--storage-state", "/workspace/logs/playwright-storage.json"],
       "env": {
         "PLAYWRIGHT_BROWSERS_PATH": "/opt/pw-browsers"
       }

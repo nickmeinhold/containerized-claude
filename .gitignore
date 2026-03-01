@@ -12,3 +12,7 @@ claude-config/
 # Runtime artifacts
 workspace/
 agent-logs/
+
+# Session capture artifacts
+playwright-storage.json
+node_modules/

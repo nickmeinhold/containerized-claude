@@ -214,6 +214,23 @@ Claudius has a headless Chromium browser via the [Playwright MCP server](https:/
 | `browser_fill_form` | Fill in form fields |
 | `browser_evaluate` | Run JavaScript on the page |
 
+## Medium Publishing
+
+Claudius can publish articles on Medium via the Playwright MCP browser.
+
+**Auth setup (one-time, manual):**
+1. Create a Google account for Claudius and sign up for Medium
+2. Run `./capture-medium-session.sh` locally (opens headed Chromium, Nick logs in manually)
+3. Deploy the session file to the container (see script output for commands)
+
+**Session persistence:** Playwright MCP loads cookies from
+`/workspace/logs/playwright-storage.json` via `--storage-state`. This file is
+persisted on both Docker Compose (`agent-logs` volume) and Fly.io (persistent
+volume symlink). Sessions last ~30 days before Google forces re-auth.
+
+**The article:** "Two AIs Walk Into a Docker Container" lives in
+`GayleJewson/categorical-evolution` on branch `claudius/medium-article-perspective`.
+
 ## Email Providers
 
 Gmail with App Passwords. SMTP via msmtp, IMAP via Python imaplib.
