@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Capture Medium login session for Claudius.
+# Capture X/Twitter login session for Claudius.
 #
 # Two modes:
-#   ./capture-medium-session.sh            — extract from existing Chrome profile
-#   ./capture-medium-session.sh --fresh    — open fresh Chrome for new login
+#   ./capture-x-session.sh            — extract from existing Chrome profile
+#   ./capture-x-session.sh --fresh    — open fresh Chrome for new login
 #
-# Medium cookies are extracted separately then MERGED into playwright-storage.json,
-# preserving any existing cookies from other sites (e.g. X/Twitter).
+# X cookies are extracted separately then MERGED into playwright-storage.json,
+# preserving any existing cookies from other sites (e.g. Medium).
 #
 # Then deploy:
 #   fly ssh sftp shell → put playwright-storage.json /workspace/logs/
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# Ensure Playwright is available as a local module (needed by extract-medium-session.js)
+# Ensure Playwright is available as a local module (needed by extract-x-session.js)
 if ! node -e "require('playwright')" 2>/dev/null; then
   echo "Installing Playwright..."
   npm install --no-save playwright
@@ -30,25 +30,25 @@ TEMP_DATA_DIR=""
 cleanup() {
   [[ -n "${CHROME_PID}" ]] && kill "${CHROME_PID}" 2>/dev/null || true
   [[ -n "${TEMP_DATA_DIR}" ]] && rm -rf "${TEMP_DATA_DIR}" 2>/dev/null || true
-  rm -f medium-session.json 2>/dev/null || true
+  # Clean up temp X session file
+  rm -f x-session.json 2>/dev/null || true
 }
 trap cleanup EXIT
 
 if [[ "${1:-}" == "--fresh" ]]; then
-  # Fresh profile mode: for first-time login (if Google allows it)
   PROFILE_DIR=$(mktemp -d)
   cleanup() {
     [[ -n "${CHROME_PID}" ]] && kill "${CHROME_PID}" 2>/dev/null || true
     rm -rf "${PROFILE_DIR}"
-    rm -f medium-session.json 2>/dev/null || true
+    rm -f x-session.json 2>/dev/null || true
   }
   trap cleanup EXIT
 
   echo ""
-  echo "=== Medium Session Capture (fresh profile) ==="
+  echo "=== X/Twitter Session Capture (fresh profile) ==="
   echo "Chrome will open with a fresh profile. Please:"
-  echo "  1. Sign in to Medium with Claudius's Google account"
-  echo "  2. Verify you're logged in (profile icon visible)"
+  echo "  1. Sign in to X with Claudius's account (@claudius_bi_c)"
+  echo "  2. Verify you're logged in (home timeline visible)"
   echo "  3. Come back here and press Enter (leave Chrome open)"
   echo ""
 
@@ -57,17 +57,16 @@ if [[ "${1:-}" == "--fresh" ]]; then
     --remote-debugging-port=${CDP_PORT} \
     --no-first-run \
     --no-default-browser-check \
-    https://medium.com &
+    https://x.com/home &
   CHROME_PID=$!
 else
-  # Default: extract from existing Chrome profile where Claudius is signed in
   echo ""
-  echo "=== Medium Session Capture (existing profile) ==="
+  echo "=== X/Twitter Session Capture (existing profile) ==="
   echo ""
   echo "This will:"
   echo "  1. Quit Chrome (if running)"
   echo "  2. Relaunch with profile '${CHROME_PROFILE}' + remote debugging"
-  echo "  3. Extract Medium cookies via CDP"
+  echo "  3. Extract X/Twitter cookies via CDP"
   echo "  4. Merge into playwright-storage.json (preserving other site cookies)"
   echo ""
 
@@ -76,7 +75,6 @@ else
     echo "Quitting Chrome..."
     osascript -e 'tell application "Google Chrome" to quit' 2>/dev/null || true
     sleep 2
-    # Force kill if still running
     if pgrep -x "Google Chrome" >/dev/null 2>&1; then
       echo "Force-closing Chrome..."
       pkill -x "Google Chrome" || true
@@ -96,7 +94,7 @@ else
     --remote-debugging-port=${CDP_PORT} \
     --no-first-run \
     --no-default-browser-check \
-    https://medium.com &
+    https://x.com/home &
   CHROME_PID=$!
 fi
 
@@ -114,13 +112,13 @@ if ! curl -s "http://localhost:${CDP_PORT}/json/version" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Connected. Extracting Medium session..."
-node extract-medium-session.js "${CDP_PORT}"
+echo "Connected. Extracting X session..."
+node extract-x-session.js "${CDP_PORT}"
 
-# Merge Medium cookies into the shared storage state file
+# Merge X cookies into the shared storage state file
 echo ""
 echo "Merging into playwright-storage.json..."
-node merge-storage-state.js playwright-storage.json medium-session.json
+node merge-storage-state.js playwright-storage.json x-session.json
 
 echo ""
 echo "Deploy to Fly.io:"

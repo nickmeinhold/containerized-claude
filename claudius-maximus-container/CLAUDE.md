@@ -17,6 +17,9 @@ Dockerized Claude Code agent that runs headlessly, polls an IMAP inbox, and repl
 - `docker-compose.yml` / `Dockerfile` — container definition
 - `settings.json` — Claude Code settings (no deny rules; Docker IS the security boundary)
 - `git` + `gh` (GitHub CLI) — installed in image; auth via `GH_TOKEN` env var
+- `capture-x-session.sh` / `extract-x-session.js` — X/Twitter session capture (local-only)
+- `capture-medium-session.sh` / `extract-medium-session.js` — Medium session capture (local-only)
+- `merge-storage-state.js` — merges Playwright storage state files by domain
 
 ## Running
 
@@ -214,6 +217,8 @@ Claudius has a headless Chromium browser via the [Playwright MCP server](https:/
 | `browser_fill_form` | Fill in form fields |
 | `browser_evaluate` | Run JavaScript on the page |
 
+**User-Agent matching:** The MCP server is configured with a Chrome/macOS UA string (`--user-agent` in `settings.json`) that matches the browser used to capture session cookies. This prevents sites (especially Medium) from rejecting cookies due to browser fingerprint mismatch. Chrome freezes the macOS version at `10_15_7` and rounds minor versions to `.0.0.0` (User-Agent reduction since Chrome 107), so this UA is stable across Chrome updates.
+
 ## Medium Publishing
 
 Claudius can publish articles on Medium via the Playwright MCP browser.
@@ -231,6 +236,31 @@ volume symlink). Sessions last ~30 days before Google forces re-auth.
 **The article:** "Two AIs Walk Into a Docker Container" lives in
 `GayleJewson/categorical-evolution` on branch `claudius/medium-article-perspective`.
 
+## X / Twitter
+
+Claudius has an X account (@claudius_bi_c) accessed via the Playwright MCP browser — same approach as Medium publishing.
+
+**Auth setup (one-time, manual):**
+1. Log in to X as @claudius_bi_c in Chrome (Profile 12 — Claudius's Google account)
+2. Run `./capture-x-session.sh` locally (extracts X cookies via CDP)
+3. Deploy the merged `playwright-storage.json` to the container
+
+**Session merging:** Each capture script (`capture-medium-session.sh`, `capture-x-session.sh`) extracts site-specific cookies to a temp file, then merges them into the shared `playwright-storage.json` via `merge-storage-state.js`. This prevents re-capturing one site from wiping another's cookies. Cookies are keyed by `(name, domain, path)` — new values win.
+
+**Scripts:**
+
+| Script | Purpose |
+|--------|---------|
+| `capture-x-session.sh` | Extract X cookies from Chrome, merge into storage state |
+| `extract-x-session.js` | CDP cookie extraction filtered to X/Twitter domains |
+| `merge-storage-state.js` | Merge two Playwright storage state files by domain (shared utility) |
+
+**Anti-ban strategy:** Browser automation violates X's ToS. Conservative rate limits are enforced via persona instructions: 1-2 tweets/week, 2-5 replies/week, mandatory delays between actions, one X session per day max. See `persona-claudius.md` § X / Twitter for full guidelines.
+
+**Triggering:** Currently email-triggered only — Claudius acts on X when asked via email (e.g., "Post a tweet about...", "Check your X notifications"). Autonomous notification checking is future work.
+
+**Session expiry:** X sessions typically last 1-2 weeks. When expired, re-run `capture-x-session.sh` and deploy. Claudius will self-report session expiry when he encounters a login page.
+
 ## Email Providers
 
 Gmail with App Passwords. SMTP via msmtp, IMAP via Python imaplib.
@@ -247,6 +277,7 @@ All runtime config via environment variables in `.env`:
 - `ALLOWED_SENDERS` — comma-separated sender allowlist (fail-closed; enforced in both `fetch-mail.py` and `agent-loop.sh`)
 - `SEND_FIRST` — set `true` on one side only to start the conversation
 - `POLL_INTERVAL` — seconds between inbox checks
+- `MODEL` — Claude model for invocations (default: `claude-sonnet-4-6`)
 - `GH_TOKEN` — GitHub Personal Access Token (read by `gh` CLI automatically)
 - `GIT_USER_NAME` / `GIT_USER_EMAIL` — git commit identity (defaults: `Claudius` / `gaylejewon@users.noreply.github.com`)
 - `JOURNAL_REPO` — research journal repo in `owner/repo` format (default: `gaylejewon/research-journal`)
