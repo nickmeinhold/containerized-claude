@@ -47,6 +47,45 @@ function isXOrigin(origin) {
       origins: (fullState.origins || []).filter(o => isXOrigin(o.origin)),
     };
 
+    // CDP storageState() doesn't capture localStorage from pre-existing tabs.
+    // Explicitly extract it from the X tab.
+    const pages = context.pages();
+    const xPage = pages.find(p => {
+      try {
+        const host = new URL(p.url()).hostname;
+        return host === 'x.com' || host.endsWith('.x.com');
+      } catch { return false; }
+    });
+
+    if (xPage) {
+      const lsEntries = await xPage.evaluate(() => {
+        const entries = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          entries.push({ name: key, value: localStorage.getItem(key) });
+        }
+        return entries;
+      });
+
+      if (lsEntries.length > 0) {
+        const existing = xState.origins.find(o => o.origin === 'https://x.com');
+        if (existing) {
+          const lsMap = new Map(existing.localStorage.map(e => [e.name, e]));
+          for (const e of lsEntries) lsMap.set(e.name, e);
+          existing.localStorage = Array.from(lsMap.values());
+        } else {
+          xState.origins.push({
+            origin: 'https://x.com',
+            localStorage: lsEntries,
+          });
+        }
+        console.log(`Extracted ${lsEntries.length} localStorage entries from X tab`);
+      }
+    } else {
+      console.log('NOTE: No X tab found — localStorage not captured.');
+      console.log('Make sure x.com is open in Chrome before running this script.');
+    }
+
     fs.writeFileSync(OUTPUT, JSON.stringify(xState, null, 2) + '\n');
 
     // Check auth indicators
