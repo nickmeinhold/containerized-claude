@@ -27,6 +27,13 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Install Claude Code CLI globally
 RUN npm install -g @anthropic-ai/claude-code
 
+# Install Playwright MCP server and headless Chromium browser
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN npm install -g @playwright/mcp \
+    && npx playwright install-deps chromium \
+    && npx playwright install chromium \
+    && chmod -R 755 /opt/pw-browsers
+
 # Create a non-root user — Claude Code refuses --dangerously-skip-permissions as root
 RUN useradd -m -s /bin/bash claudius
 
@@ -41,6 +48,7 @@ COPY CLAUDE.md /home/claudius/.claude/CLAUDE.md
 
 # Copy application files
 COPY settings.json /home/claudius/.claude/settings.json
+COPY playwright-mcp-config.json /home/claudius/.claude/playwright-mcp-config.json
 # msmtprc is mounted at runtime via docker-compose.yml to keep SMTP
 # credentials out of image layers. This placeholder is overlaid by the
 # bind mount — actual permissions come from the host file.

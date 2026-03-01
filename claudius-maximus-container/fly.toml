@@ -23,7 +23,7 @@ primary_region = "iad"
 
 [vm]
   size = "shared-cpu-1x"
-  memory = 512
+  memory = 1024
 
 # Headless email-polling worker — no HTTP service.
 # Machine restarts automatically on failure.

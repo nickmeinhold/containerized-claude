@@ -1,0 +1,22 @@
+{
+  "_note": "Chrome version (145) must match across userAgent and all sec-ch-ua headers. Update when it drifts too far from current stable. macOS 10_15_7 is frozen by UA reduction (Chrome 107+).",
+  "browser": {
+    "contextOptions": {
+      "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      "extraHTTPHeaders": {
+        "sec-ch-ua": "\"Google Chrome\";v=\"145\", \"Chromium\";v=\"145\", \"Not-A.Brand\";v=\"24\"",
+        "sec-ch-ua-platform": "\"macOS\"",
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-arch": "\"x86\"",
+        "sec-ch-ua-bitness": "\"64\"",
+        "sec-ch-ua-full-version": "\"145.0.0.0\"",
+        "sec-ch-ua-full-version-list": "\"Google Chrome\";v=\"145.0.0.0\", \"Chromium\";v=\"145.0.0.0\", \"Not-A.Brand\";v=\"24.0.0.0\"",
+        "sec-ch-ua-platform-version": "\"14.0.0\"",
+        "sec-ch-ua-model": "\"\""
+      }
+    },
+    "launchOptions": {
+      "args": ["--disable-blink-features=AutomationControlled"]
+    }
+  }
+}

@@ -11,6 +11,7 @@ services:
     container_name: claudius
     restart: unless-stopped
     env_file: .env
+    shm_size: '256m'
     volumes:
       # OAuth credentials (extracted from macOS Keychain)
       # Mounted read-write so Claude Code can persist refreshed tokens

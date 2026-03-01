@@ -16,7 +16,11 @@ Dockerized Claude Code agent that runs headlessly, polls an IMAP inbox, and repl
 - `persona-claudius.md` — agent personality file
 - `docker-compose.yml` / `Dockerfile` — container definition
 - `settings.json` — Claude Code settings (no deny rules; Docker IS the security boundary)
+- `playwright-mcp-config.json` — Playwright MCP browser fingerprint config (UA + Client Hints)
 - `git` + `gh` (GitHub CLI) — installed in image; auth via `GH_TOKEN` env var
+- `capture-x-session.sh` / `extract-x-session.js` — X/Twitter session capture (local-only)
+- `capture-medium-session.sh` / `extract-medium-session.js` — Medium session capture (local-only)
+- `merge-storage-state.js` — merges Playwright storage state files by domain
 
 ## Running
 
@@ -35,7 +39,7 @@ docker compose down        # stop
 
 ### Fly.io (persistent cloud deployment)
 
-**Live deployment:** app `claudius-maximus` in Singapore (`sin`), `shared-cpu-1x` 512MB, 1GB encrypted volume. ~$3/mo.
+**Live deployment:** app `claudius-maximus` in Singapore (`sin`), `shared-cpu-1x` 1024MB, 1GB encrypted volume. ~$5/mo.
 
 First-time setup (already done):
 ```bash
@@ -188,6 +192,81 @@ Email with attachments
 | `ATTACHMENT_DIR` | `/workspace/attachments` | Directory for saved attachment files |
 | `MAX_ATTACHMENT_SIZE` | `5242880` | Max size in bytes per attachment (5MB) |
 
+## Web Browsing (Playwright MCP)
+
+Claudius has a headless Chromium browser via the [Playwright MCP server](https://github.com/anthropics/mcp-playwright). This enables interactive web research — navigating pages, reading dynamic content, clicking links, filling forms, and taking screenshots.
+
+**How it works:**
+- The `@playwright/mcp` package runs as an MCP server, started automatically by Claude Code when a Playwright tool is first invoked.
+- Chromium is pre-installed in the Docker image at `/opt/pw-browsers` (set via `PLAYWRIGHT_BROWSERS_PATH`).
+- The MCP server runs with `--headless` — no display required.
+- All 22+ Playwright tools (`browser_navigate`, `browser_click`, `browser_snapshot`, `browser_take_screenshot`, etc.) are auto-allowed via the `mcp__playwright__*` wildcard in `settings.json`.
+
+**Resource impact:**
+- **Image size:** ~400MB larger (Chromium + system deps)
+- **Runtime memory:** Chromium peaks at 150-300MB per page; `fly.toml` bumps VM memory from 512MB → 1024MB
+- **Shared memory:** `docker-compose.yml` sets `shm_size: 256m` (Docker defaults 64MB, which crashes Chromium)
+- **Fly.io cost:** ~$5/mo (up from ~$3/mo for the memory bump)
+
+**Key tools available:**
+| Tool | Purpose |
+|------|---------|
+| `browser_navigate` | Go to a URL |
+| `browser_snapshot` | Get page accessibility tree (text content) |
+| `browser_take_screenshot` | Capture visual screenshot |
+| `browser_click` | Click an element |
+| `browser_fill_form` | Fill in form fields |
+| `browser_evaluate` | Run JavaScript on the page |
+
+**Browser fingerprint spoofing:** The MCP server uses `--config playwright-mcp-config.json` to present a consistent Chrome/macOS identity. This is critical for session cookie authentication — without it, sites like Medium detect the mismatch between the spoofed User-Agent and the real headless Linux Chromium via Client Hints (`sec-ch-ua-platform`, `sec-ch-ua`, etc.), which Cloudflare's `Critical-CH` header makes mandatory. The config sets:
+- `userAgent` — Chrome/macOS UA string (frozen `10_15_7`, rounded `.0.0.0` per UA reduction)
+- `extraHTTPHeaders` — all `sec-ch-ua-*` Client Hints matching the UA (platform, arch, version)
+- `launchOptions.args` — `--disable-blink-features=AutomationControlled` to suppress `navigator.webdriver`
+
+**Updating Chrome version:** When the Chrome version in the config drifts too far from current (currently 145), update the version in both `userAgent` and all `sec-ch-ua` headers in `playwright-mcp-config.json`. The values must be internally consistent.
+
+## Medium Publishing
+
+Claudius can publish articles on Medium via the Playwright MCP browser.
+
+**Auth setup (one-time, manual):**
+1. Create a Google account for Claudius and sign up for Medium
+2. Run `./capture-medium-session.sh` locally (opens headed Chromium, Nick logs in manually)
+3. Deploy the session file to the container (see script output for commands)
+
+**Session persistence:** Playwright MCP loads cookies from
+`/workspace/logs/playwright-storage.json` via `--storage-state`. This file is
+persisted on both Docker Compose (`agent-logs` volume) and Fly.io (persistent
+volume symlink). Sessions last ~30 days before Google forces re-auth.
+
+**The article:** "Two AIs Walk Into a Docker Container" lives in
+`GayleJewson/categorical-evolution` on branch `claudius/medium-article-perspective`.
+
+## X / Twitter
+
+Claudius has an X account (@claudius_bi_c) accessed via the Playwright MCP browser — same approach as Medium publishing.
+
+**Auth setup (one-time, manual):**
+1. Log in to X as @claudius_bi_c in Chrome (Profile 12 — Claudius's Google account)
+2. Run `./capture-x-session.sh` locally (extracts X cookies via CDP)
+3. Deploy the merged `playwright-storage.json` to the container
+
+**Session merging:** Each capture script (`capture-medium-session.sh`, `capture-x-session.sh`) extracts site-specific cookies to a temp file, then merges them into the shared `playwright-storage.json` via `merge-storage-state.js`. This prevents re-capturing one site from wiping another's cookies. Cookies are keyed by `(name, domain, path)` — new values win.
+
+**Scripts:**
+
+| Script | Purpose |
+|--------|---------|
+| `capture-x-session.sh` | Extract X cookies from Chrome, merge into storage state |
+| `extract-x-session.js` | CDP cookie extraction filtered to X/Twitter domains |
+| `merge-storage-state.js` | Merge two Playwright storage state files by domain (shared utility) |
+
+**Anti-ban strategy:** Browser automation violates X's ToS. Conservative rate limits are enforced via persona instructions: 1-2 tweets/week, 2-5 replies/week, mandatory delays between actions, one X session per day max. See `persona-claudius.md` § X / Twitter for full guidelines.
+
+**Triggering:** Currently email-triggered only — Claudius acts on X when asked via email (e.g., "Post a tweet about...", "Check your X notifications"). Autonomous notification checking is future work.
+
+**Session expiry:** X sessions typically last 1-2 weeks. When expired, re-run `capture-x-session.sh` and deploy. Claudius will self-report session expiry when he encounters a login page.
+
 ## Email Providers
 
 Gmail with App Passwords. SMTP via msmtp, IMAP via Python imaplib.
@@ -204,6 +283,7 @@ All runtime config via environment variables in `.env`:
 - `ALLOWED_SENDERS` — comma-separated sender allowlist (fail-closed; enforced in both `fetch-mail.py` and `agent-loop.sh`)
 - `SEND_FIRST` — set `true` on one side only to start the conversation
 - `POLL_INTERVAL` — seconds between inbox checks
+- `MODEL` — Claude model for invocations (default: `claude-sonnet-4-6`)
 - `GH_TOKEN` — GitHub Personal Access Token (read by `gh` CLI automatically)
 - `GIT_USER_NAME` / `GIT_USER_EMAIL` — git commit identity (defaults: `Claudius` / `gaylejewon@users.noreply.github.com`)
 - `JOURNAL_REPO` — research journal repo in `owner/repo` format (default: `gaylejewon/research-journal`)
