@@ -102,6 +102,7 @@ else
   echo "Launching Chrome with profile '${CHROME_PROFILE}' and CDP on port ${CDP_PORT}..."
   "${CHROME}" \
     --user-data-dir="${TEMP_DATA_DIR}" \
+    --profile-directory=Default \
     --remote-debugging-port=${CDP_PORT} \
     --no-first-run \
     --no-default-browser-check \
@@ -123,7 +124,10 @@ if ! curl -s "http://localhost:${CDP_PORT}/json/version" >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "Connected. Extracting X session..."
+echo "Connected. Waiting for page to load..."
+sleep 5
+
+echo "Extracting X session..."
 node extract-x-session.js "${CDP_PORT}"
 
 # Merge X cookies into the shared storage state file
