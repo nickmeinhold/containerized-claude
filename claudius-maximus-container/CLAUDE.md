@@ -35,7 +35,7 @@ docker compose down        # stop
 
 ### Fly.io (persistent cloud deployment)
 
-**Live deployment:** app `claudius-maximus` in Singapore (`sin`), `shared-cpu-1x` 512MB, 1GB encrypted volume. ~$3/mo.
+**Live deployment:** app `claudius-maximus` in Singapore (`sin`), `shared-cpu-1x` 1024MB, 1GB encrypted volume. ~$5/mo.
 
 First-time setup (already done):
 ```bash
@@ -187,6 +187,32 @@ Email with attachments
 |----------|---------|---------|
 | `ATTACHMENT_DIR` | `/workspace/attachments` | Directory for saved attachment files |
 | `MAX_ATTACHMENT_SIZE` | `5242880` | Max size in bytes per attachment (5MB) |
+
+## Web Browsing (Playwright MCP)
+
+Claudius has a headless Chromium browser via the [Playwright MCP server](https://github.com/anthropics/mcp-playwright). This enables interactive web research — navigating pages, reading dynamic content, clicking links, filling forms, and taking screenshots.
+
+**How it works:**
+- The `@playwright/mcp` package runs as an MCP server, started automatically by Claude Code when a Playwright tool is first invoked.
+- Chromium is pre-installed in the Docker image at `/opt/pw-browsers` (set via `PLAYWRIGHT_BROWSERS_PATH`).
+- The MCP server runs with `--headless` — no display required.
+- All 22+ Playwright tools (`browser_navigate`, `browser_click`, `browser_snapshot`, `browser_take_screenshot`, etc.) are auto-allowed via the `mcp__playwright__*` wildcard in `settings.json`.
+
+**Resource impact:**
+- **Image size:** ~400MB larger (Chromium + system deps)
+- **Runtime memory:** Chromium peaks at 150-300MB per page; `fly.toml` bumps VM memory from 512MB → 1024MB
+- **Shared memory:** `docker-compose.yml` sets `shm_size: 256m` (Docker defaults 64MB, which crashes Chromium)
+- **Fly.io cost:** ~$5/mo (up from ~$3/mo for the memory bump)
+
+**Key tools available:**
+| Tool | Purpose |
+|------|---------|
+| `browser_navigate` | Go to a URL |
+| `browser_snapshot` | Get page accessibility tree (text content) |
+| `browser_take_screenshot` | Capture visual screenshot |
+| `browser_click` | Click an element |
+| `browser_fill_form` | Fill in form fields |
+| `browser_evaluate` | Run JavaScript on the page |
 
 ## Email Providers
 

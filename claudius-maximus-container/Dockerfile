@@ -27,6 +27,13 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Install Claude Code CLI globally
 RUN npm install -g @anthropic-ai/claude-code
 
+# Install Playwright MCP server and headless Chromium browser
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers
+RUN npm install -g @playwright/mcp \
+    && npx playwright install-deps chromium \
+    && npx playwright install chromium \
+    && chmod -R 755 /opt/pw-browsers
+
 # Create a non-root user — Claude Code refuses --dangerously-skip-permissions as root
 RUN useradd -m -s /bin/bash claudius
 

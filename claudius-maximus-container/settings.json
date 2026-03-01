@@ -7,7 +7,17 @@
       "Edit",
       "Write",
       "WebFetch",
-      "WebSearch"
+      "WebSearch",
+      "mcp__playwright__*"
     ]
+  },
+  "mcpServers": {
+    "playwright": {
+      "command": "playwright-mcp",
+      "args": ["--headless"],
+      "env": {
+        "PLAYWRIGHT_BROWSERS_PATH": "/opt/pw-browsers"
+      }
+    }
   }
 }
