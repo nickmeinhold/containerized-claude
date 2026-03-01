@@ -34,6 +34,7 @@ JOURNAL_DIR="/workspace/repos/${JOURNAL_REPO}"
 ARCHIVE_REPO="${ARCHIVE_REPO:-}"
 ARCHIVE_DIR="/workspace/repos/${ARCHIVE_REPO}"
 ATTACHMENT_DIR="${ATTACHMENT_DIR:-/workspace/attachments}"
+MODEL="${MODEL:-claude-sonnet-4-6}"
 
 # ── Helpers ──────────────────────────────────────────────────────
 
@@ -754,6 +755,7 @@ log "  Owner:      ${OWNER_EMAIL:-not set}"
 log "  CC email:   ${CC_EMAIL:-none}"
 log "  IMAP host:  ${IMAP_HOST}"
 log "  Poll every: ${POLL_INTERVAL}s"
+log "  Model:          ${MODEL}"
 log "  Max turns:      ${MAX_TURNS}/invocation"
 log "  Weekly quota:   ${WEEKLY_TURN_QUOTA} turns (reset: day ${QUOTA_RESET_DAY} @ ${QUOTA_RESET_HOUR_UTC}:00 UTC)"
 log "  Usage report:   every ${REPORT_EVERY_N} invocations (0=disabled)"
@@ -849,6 +851,7 @@ EOF
   ensure_valid_token
   CLAUDE_EXIT=0
   CLAUDE_OUTPUT=$(claude -p "${FIRST_MSG_PROMPT}" \
+    --model "${MODEL}" \
     --max-turns "${MAX_TURNS}" \
     --output-format json \
     --dangerously-skip-permissions \
@@ -861,6 +864,7 @@ EOF
     if refresh_token; then
       CLAUDE_EXIT=0
       CLAUDE_OUTPUT=$(claude -p "${FIRST_MSG_PROMPT}" \
+        --model "${MODEL}" \
         --max-turns "${MAX_TURNS}" \
         --output-format json \
         --dangerously-skip-permissions \
@@ -1097,6 +1101,7 @@ EOF
     ensure_valid_token
     CLAUDE_EXIT=0
     CLAUDE_OUTPUT=$(claude -p "${REPLY_PROMPT}" \
+      --model "${MODEL}" \
       --max-turns "${MAX_TURNS}" \
       --output-format json \
       --dangerously-skip-permissions \
@@ -1111,6 +1116,7 @@ EOF
       if refresh_token; then
         CLAUDE_EXIT=0
         CLAUDE_OUTPUT=$(claude -p "${REPLY_PROMPT}" \
+          --model "${MODEL}" \
           --max-turns "${MAX_TURNS}" \
           --output-format json \
           --dangerously-skip-permissions \
