@@ -20,6 +20,15 @@ if ! node -e "require('playwright')" 2>/dev/null; then
 fi
 
 CDP_PORT=9222
+
+# These scripts are local-only (macOS) — they extract cookies from your Chrome
+# profile via CDP. They don't run inside the Docker container.
+if [[ "$(uname)" != "Darwin" ]]; then
+  echo "ERROR: This script requires macOS (Chrome profile access via CDP)."
+  echo "Run it on your Mac, then deploy playwright-storage.json to the container."
+  exit 1
+fi
+
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 CHROME_USER_DATA_DIR="${HOME}/Library/Application Support/Google/Chrome"
 # Profile 12 = xdeca (Claudius's Google account)
@@ -59,6 +68,8 @@ if [[ "${1:-}" == "--fresh" ]]; then
     --no-default-browser-check \
     https://medium.com &
   CHROME_PID=$!
+
+  read -rp "Press Enter when you're logged in to Medium..."
 else
   # Default: extract from existing Chrome profile where Claudius is signed in
   echo ""
