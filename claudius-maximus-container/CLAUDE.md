@@ -16,6 +16,7 @@ Dockerized Claude Code agent that runs headlessly, polls an IMAP inbox, and repl
 - `persona-claudius.md` — agent personality file
 - `docker-compose.yml` / `Dockerfile` — container definition
 - `settings.json` — Claude Code settings (no deny rules; Docker IS the security boundary)
+- `playwright-mcp-config.json` — Playwright MCP browser fingerprint config (UA + Client Hints)
 - `git` + `gh` (GitHub CLI) — installed in image; auth via `GH_TOKEN` env var
 - `capture-x-session.sh` / `extract-x-session.js` — X/Twitter session capture (local-only)
 - `capture-medium-session.sh` / `extract-medium-session.js` — Medium session capture (local-only)
@@ -217,7 +218,12 @@ Claudius has a headless Chromium browser via the [Playwright MCP server](https:/
 | `browser_fill_form` | Fill in form fields |
 | `browser_evaluate` | Run JavaScript on the page |
 
-**User-Agent matching:** The MCP server is configured with a Chrome/macOS UA string (`--user-agent` in `settings.json`) that matches the browser used to capture session cookies. This prevents sites (especially Medium) from rejecting cookies due to browser fingerprint mismatch. Chrome freezes the macOS version at `10_15_7` and rounds minor versions to `.0.0.0` (User-Agent reduction since Chrome 107), so this UA is stable across Chrome updates.
+**Browser fingerprint spoofing:** The MCP server uses `--config playwright-mcp-config.json` to present a consistent Chrome/macOS identity. This is critical for session cookie authentication — without it, sites like Medium detect the mismatch between the spoofed User-Agent and the real headless Linux Chromium via Client Hints (`sec-ch-ua-platform`, `sec-ch-ua`, etc.), which Cloudflare's `Critical-CH` header makes mandatory. The config sets:
+- `userAgent` — Chrome/macOS UA string (frozen `10_15_7`, rounded `.0.0.0` per UA reduction)
+- `extraHTTPHeaders` — all `sec-ch-ua-*` Client Hints matching the UA (platform, arch, version)
+- `launchOptions.args` — `--disable-blink-features=AutomationControlled` to suppress `navigator.webdriver`
+
+**Updating Chrome version:** When the Chrome version in the config drifts too far from current (currently 145), update the version in both `userAgent` and all `sec-ch-ua` headers in `playwright-mcp-config.json`. The values must be internally consistent.
 
 ## Medium Publishing
 

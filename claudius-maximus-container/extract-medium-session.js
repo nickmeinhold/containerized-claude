@@ -45,6 +45,43 @@ function isMediumOrigin(origin) {
       origins: (fullState.origins || []).filter(o => isMediumOrigin(o.origin)),
     };
 
+    // CDP storageState() doesn't capture localStorage from pre-existing tabs.
+    // Explicitly extract it from the Medium page.
+    const pages = context.pages();
+    const mediumPage = pages.find(p => {
+      try { return new URL(p.url()).hostname.includes('medium.com'); } catch { return false; }
+    });
+
+    if (mediumPage) {
+      const lsEntries = await mediumPage.evaluate(() => {
+        const entries = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          entries.push({ name: key, value: localStorage.getItem(key) });
+        }
+        return entries;
+      });
+
+      if (lsEntries.length > 0) {
+        // Merge with any origins already captured (unlikely via CDP, but be safe)
+        const existing = mediumState.origins.find(o => o.origin === 'https://medium.com');
+        if (existing) {
+          const lsMap = new Map(existing.localStorage.map(e => [e.name, e]));
+          for (const e of lsEntries) lsMap.set(e.name, e);
+          existing.localStorage = Array.from(lsMap.values());
+        } else {
+          mediumState.origins.push({
+            origin: 'https://medium.com',
+            localStorage: lsEntries,
+          });
+        }
+        console.log(`Extracted ${lsEntries.length} localStorage entries from Medium tab`);
+      }
+    } else {
+      console.log('NOTE: No Medium tab found — localStorage not captured.');
+      console.log('Make sure medium.com is open in Chrome before running this script.');
+    }
+
     fs.writeFileSync(OUTPUT, JSON.stringify(mediumState, null, 2) + '\n');
 
     // Check auth indicators
@@ -56,10 +93,12 @@ function isMediumOrigin(origin) {
       c => c.name === 'sid' && c.domain?.includes('medium.com')
     );
 
-    if (hasSid) {
+    if (hasSid && isLoggedIn?.value === 'true') {
+      console.log(`Medium session saved to ${OUTPUT} (sid + localStorage — fully authenticated)`);
+    } else if (hasSid) {
       console.log(`Medium session saved to ${OUTPUT} (sid cookie found — authenticated)`);
     } else if (isLoggedIn?.value === 'true') {
-      console.log(`Medium session saved to ${OUTPUT} (logged in!)`);
+      console.log(`Medium session saved to ${OUTPUT} (localStorage logged in)`);
     } else {
       console.log(`Medium session saved to ${OUTPUT}`);
       console.log('WARNING: no auth indicators found — you may not be logged in.');

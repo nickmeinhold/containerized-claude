@@ -48,6 +48,7 @@ COPY CLAUDE.md /home/claudius/.claude/CLAUDE.md
 
 # Copy application files
 COPY settings.json /home/claudius/.claude/settings.json
+COPY playwright-mcp-config.json /home/claudius/.claude/playwright-mcp-config.json
 # msmtprc is mounted at runtime via docker-compose.yml to keep SMTP
 # credentials out of image layers. This placeholder is overlaid by the
 # bind mount — actual permissions come from the host file.
