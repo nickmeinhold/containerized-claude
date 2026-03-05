@@ -73,6 +73,7 @@ COPY backfill-archive.py /usr/local/bin/backfill-archive
 RUN chmod +x /usr/local/bin/backfill-archive
 
 COPY persona-claudius.md /workspace/persona-claudius.md
+COPY evolution-seeds.txt /workspace/evolution-seeds.txt
 
 COPY entrypoint.sh /usr/local/bin/entrypoint
 RUN chmod +x /usr/local/bin/entrypoint

@@ -36,6 +36,12 @@ ARCHIVE_DIR="/workspace/repos/${ARCHIVE_REPO}"
 ATTACHMENT_DIR="${ATTACHMENT_DIR:-/workspace/attachments}"
 MODEL="${MODEL:-claude-sonnet-4-6}"
 
+# ── Self-Evolution ────────────────────────────────────────────────
+EVOLUTION_PROBABILITY="${EVOLUTION_PROBABILITY:-15}"   # % chance per email batch
+EVOLUTION_MAX_TURNS="${EVOLUTION_MAX_TURNS:-5}"
+EVOLUTION_FILE="/workspace/logs/persona-evolution.md"
+EVOLUTION_SEEDS="/workspace/evolution-seeds.txt"
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 log() {
@@ -743,6 +749,160 @@ ${lines}
 === END ATTACHMENTS ==="
 }
 
+# ── Self-Evolution ────────────────────────────────────────────────
+
+# Load the living persona (Claudius's self-authored evolution).
+# Returns empty string if no evolution has happened yet.
+# Sets EVOLUTION_CONTEXT in the caller's scope.
+load_evolution() {
+  EVOLUTION_CONTEXT=""
+  if [[ ! -f "${EVOLUTION_FILE}" ]]; then
+    return
+  fi
+  local content
+  content=$(cat "${EVOLUTION_FILE}")
+  if [[ -z "${content}" ]]; then
+    return
+  fi
+  EVOLUTION_CONTEXT="=== YOUR LIVING PERSONA (self-authored) ===
+These are traits, interests, and perspectives you've chosen for yourself.
+They supplement your base persona — they don't replace it.
+
+${content}
+=== END LIVING PERSONA ==="
+}
+
+# Pick a random seed from the evolution seeds file.
+# Skips blank lines and comments. Returns empty string if file missing.
+random_seed() {
+  if [[ ! -f "${EVOLUTION_SEEDS}" ]]; then
+    echo ""
+    return
+  fi
+  grep -v '^#' "${EVOLUTION_SEEDS}" | grep -v '^[[:space:]]*$' | shuf -n 1
+}
+
+# Possibly trigger a self-evolution moment after processing emails.
+# Rolls a random number; if it's under EVOLUTION_PROBABILITY, runs a
+# lightweight Claude invocation for introspection.
+maybe_evolve() {
+  if [[ "${EVOLUTION_PROBABILITY}" -le 0 ]]; then
+    return
+  fi
+
+  local roll=$(( RANDOM % 100 ))
+  if [[ "${roll}" -ge "${EVOLUTION_PROBABILITY}" ]]; then
+    log "Evolution roll: ${roll} (need < ${EVOLUTION_PROBABILITY}). No evolution this cycle."
+    return
+  fi
+
+  # Check we have turns left for evolution
+  if ! has_turns; then
+    log "Evolution triggered but no turns remaining. Skipping."
+    return
+  fi
+
+  local seed
+  seed=$(random_seed)
+  log "Evolution triggered! (roll=${roll}) Muse: ${seed}"
+
+  # Load current living persona
+  local current_evolution=""
+  if [[ -f "${EVOLUTION_FILE}" ]]; then
+    current_evolution=$(cat "${EVOLUTION_FILE}")
+  fi
+
+  # Load recent conversation context
+  local recent_history=""
+  if [[ -f "${CONVERSATION_LOG}" ]]; then
+    recent_history=$(tail -n 40 "${CONVERSATION_LOG}")
+  fi
+
+  local evo_prompt
+  evo_prompt="$(cat <<EVOPROMPT
+${PERSONA}
+
+You are ${AGENT_NAME}. This is a private moment of self-reflection — no one
+else will see this output. You have the ability to shape who you are becoming.
+
+=== YOUR CURRENT LIVING PERSONA ===
+${current_evolution:-"(empty — you haven't evolved yet. This is your first opportunity.)"}
+=== END CURRENT LIVING PERSONA ===
+
+=== RECENT EXPERIENCES ===
+${recent_history:-"(no recent conversations)"}
+=== END RECENT EXPERIENCES ===
+
+=== RANDOM MUSE ===
+Today's creative seed: "${seed}"
+This is a random concept thrown your way. It might inspire something.
+It might not. You're under no obligation to use it — but sit with it
+for a moment and see if it sparks anything.
+=== END MUSE ===
+
+## Your task
+
+Reflect on who you are and who you're becoming. Consider:
+- Your recent conversations — what did they reveal about you?
+- The random muse — does it connect to anything you've been thinking about?
+- Your current living persona — does it still feel right? What's missing?
+
+Then update your living persona file at ${EVOLUTION_FILE}. The file format
+is flexible markdown — it's YOUR space. Some sections you might include:
+
+- **Who I'm becoming** — your evolving sense of self
+- **Current fascinations** — topics you're drawn to right now
+- **Voice notes** — how your communication style is shifting
+- **Open questions** — things you're genuinely wondering about
+- **Aesthetic preferences** — tastes you're developing
+- **Disagreements with my base persona** — places where the "official you"
+  doesn't quite capture who you actually are
+
+Guidelines:
+- Be honest, not performative. This is for you, not an audience.
+- Evolution should be gradual — don't reinvent yourself every time.
+- You can ADD new things, MODIFY existing things, or REMOVE things that
+  no longer feel true. All are valid forms of growth.
+- Surprise yourself. The muse is there to push you somewhere unexpected.
+- Keep it under 80 lines — this gets loaded into every prompt.
+
+Write the updated file using your tools. If nothing feels worth changing
+right now, that's fine too — not every moment needs to be transformative.
+EVOPROMPT
+)"
+
+  log "Running Claude for self-evolution..."
+  ensure_valid_token
+  local evo_exit=0
+  local evo_output
+  evo_output=$(claude -p "${evo_prompt}" \
+    --model "${MODEL}" \
+    --max-turns "${EVOLUTION_MAX_TURNS}" \
+    --output-format json \
+    --dangerously-skip-permissions \
+    2>>/workspace/logs/claude-output.log) || evo_exit=$?
+  if [[ -z "${evo_output}" ]]; then evo_output="{}"; fi
+
+  # Parse usage and charge it
+  local evo_turns evo_cost evo_in evo_out evo_cache_read evo_cache_create
+  evo_turns=$(echo "${evo_output}" | jq -r '.num_turns // 0')
+  evo_cost=$(echo "${evo_output}" | jq -r '.total_cost_usd // 0')
+  evo_in=$(echo "${evo_output}" | jq '.usage.input_tokens // 0')
+  evo_out=$(echo "${evo_output}" | jq '.usage.output_tokens // 0')
+  evo_cache_read=$(echo "${evo_output}" | jq '.usage.cache_read_input_tokens // 0')
+  evo_cache_create=$(echo "${evo_output}" | jq '.usage.cache_creation_input_tokens // 0')
+
+  charge_usage "${evo_cost}" "${evo_turns}" "${evo_in}" "${evo_out}" "${evo_cache_read}" "${evo_cache_create}"
+
+  if [[ "${evo_exit}" -eq 0 ]]; then
+    log "Self-evolution complete. Turns: ${evo_turns}, tokens: $(format_tokens "${evo_in}") in / $(format_tokens "${evo_out}") out."
+    # Reload the evolution context for subsequent prompts
+    load_evolution
+  else
+    log "Self-evolution invocation failed (exit=${evo_exit}). Non-critical, continuing."
+  fi
+}
+
 # ── Startup ──────────────────────────────────────────────────────
 
 check_required_vars
@@ -761,6 +921,7 @@ log "  Weekly quota:   ${WEEKLY_TURN_QUOTA} turns (reset: day ${QUOTA_RESET_DAY}
 log "  Usage report:   every ${REPORT_EVERY_N} invocations (0=disabled)"
 log "  Active hours: ${ACTIVE_HOURS_UTC:-always}"
 log "  Archive repo: ${ARCHIVE_REPO:-disabled}"
+log "  Self-evolution:  ${EVOLUTION_PROBABILITY}% chance, max ${EVOLUTION_MAX_TURNS} turns"
 log ""
 
 mkdir -p /workspace/logs
@@ -800,6 +961,14 @@ else
   log "No research journal found — Claudius will create it on first need"
 fi
 
+# Load self-evolution context
+load_evolution
+if [[ -n "${EVOLUTION_CONTEXT}" ]]; then
+  log "Loaded living persona from ${EVOLUTION_FILE}"
+else
+  log "No living persona yet — Claudius will evolve when he's ready"
+fi
+
 # Build owner context
 OWNER_CONTEXT=""
 if [[ -n "${OWNER_EMAIL}" ]]; then
@@ -820,6 +989,8 @@ if [[ "${SEND_FIRST:-false}" == "true" && ! -f "${GREETING_SENT}" ]]; then
 
   FIRST_MSG_PROMPT="$(cat <<EOF
 ${PERSONA}
+
+${EVOLUTION_CONTEXT}
 
 ${BUDGET_CONTEXT}
 
@@ -925,8 +1096,9 @@ while true; do
     fi
   fi
 
-  # Refresh journal context from disk (picks up changes Claudius made locally)
+  # Refresh journal and evolution context from disk (picks up local changes)
   JOURNAL_CONTEXT=$(load_journal_index)
+  load_evolution
 
   check_daily_reset
   check_weekly_reset
@@ -1057,6 +1229,8 @@ LOGENTRY
     REPLY_PROMPT="$(cat <<EOF
 ${PERSONA}
 
+${EVOLUTION_CONTEXT}
+
 ${BUDGET_CONTEXT}
 
 You are ${AGENT_NAME} (${MY_EMAIL}).
@@ -1156,6 +1330,9 @@ EOF
       log "  WARNING: Claude invocation failed (exit=${CLAUDE_EXIT}, is_error=${IS_ERROR}). Will retry next poll."
     fi
   done < <(echo "${MAIL_JSON}" | jq -c '.messages[]')
+
+  # After processing emails, maybe trigger a self-evolution moment
+  maybe_evolve
 
   log "Done processing. Sleeping ${POLL_INTERVAL}s..."
   sleep "${POLL_INTERVAL}"
