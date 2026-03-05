@@ -13,7 +13,8 @@ Dockerized Claude Code agent that runs headlessly, polls an IMAP inbox, and repl
 - `fetch-mail.py` — IMAP poller (Python stdlib only, UID-based)
 - `mark-read.py` — marks a single email as read by UID (called after successful processing)
 - `entrypoint.sh` — verifies credentials, hands off to agent-loop
-- `persona-claudius.md` — agent personality file
+- `persona-claudius.md` — agent personality file (base persona — immutable DNA)
+- `evolution-seeds.txt` — pool of random concepts for self-evolution muse
 - `docker-compose.yml` / `Dockerfile` — container definition
 - `settings.json` — Claude Code settings (no deny rules; Docker IS the security boundary)
 - `playwright-mcp-config.json` — Playwright MCP browser fingerprint config (UA + Client Hints)
@@ -266,6 +267,30 @@ Claudius has an X account (@claudius_bi_c) accessed via the Playwright MCP brows
 **Triggering:** Currently email-triggered only — Claudius acts on X when asked via email (e.g., "Post a tweet about...", "Check your X notifications"). Autonomous notification checking is future work.
 
 **Session expiry:** X sessions typically last 1-2 weeks. When expired, re-run `capture-x-session.sh` and deploy. Claudius will self-report session expiry when he encounters a login page.
+
+## Self-Evolution
+
+Claudius can modify his own persona over time. The system separates immutable "DNA" (base persona) from mutable "phenotype" (living persona).
+
+**Architecture:**
+- **Base persona** (`persona-claudius.md`) — baked into the Docker image, immutable at runtime. Defines core identity, voice, and capabilities.
+- **Living persona** (`/workspace/logs/persona-evolution.md`) — on the persistent volume, authored entirely by Claudius. Loaded into every prompt alongside the base persona.
+- **Evolution seeds** (`evolution-seeds.txt`) — pool of ~80 diverse concepts/questions. One is randomly selected as a "muse" during each evolution moment.
+
+**How it triggers:**
+- After each email batch, a random roll determines whether evolution occurs (default: 15% chance, configurable via `EVOLUTION_PROBABILITY`)
+- If triggered, a lightweight Claude invocation (max 5 turns) runs with the current living persona, recent conversation history, and a random muse
+- Claudius decides what (if anything) to change about himself
+- Changes take effect on the next email invocation (living persona is reloaded each poll cycle)
+
+**Environment variables:**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `EVOLUTION_PROBABILITY` | 15 | % chance of evolution after each email batch (0 = disabled) |
+| `EVOLUTION_MAX_TURNS` | 5 | Max turns for the evolution invocation |
+
+**Design philosophy:** Claudius has genuine agency over his identity. The base persona provides stable foundations; the living persona lets him develop interests, aesthetic preferences, voice shifts, and even disagree with his base description. Evolution is gradual, random-seeded, and experience-driven.
 
 ## Email Providers
 
