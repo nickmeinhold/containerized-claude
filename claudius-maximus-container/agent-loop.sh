@@ -1060,6 +1060,20 @@ Bad reasons to send:
 Ground everything in what you can verify from your journal and conversation
 history. If you write "I noticed that..." make sure you actually noticed it
 in a record you can point to. Don't fabricate continuity you don't have.
+
+### Logging
+
+Whether you send or pass, append a brief entry to your research journal at
+${JOURNAL_DIR}/conversations/initiative-log.md with the format:
+
+## YYYY-MM-DD
+**Action:** sent / pass
+**To:** <recipient or n/a>
+**Subject:** <subject or n/a>
+**Reason:** 1-2 sentences on what prompted the decision.
+
+Create the file if it doesn't exist. Add a one-liner to INDEX.md if this
+is the first initiative entry. Then commit and push the journal.
 INITPROMPT
 )"
 
@@ -1096,8 +1110,12 @@ INITPROMPT
     else
       log "Initiative: Claudius sent a proactive email. Turns: ${init_turns}, tokens: $(format_tokens "${init_in}") in / $(format_tokens "${init_out}") out."
       record_outreach
-      # Archive the outgoing email
-      archive_outgoing "${PEER_EMAIL}" "proactive outreach"
+      # Extract actual recipient and subject from conversation log entry
+      # Claude appends: "── SENT (proactive): ... ──\nTo: ...\nSubject: ..."
+      local actual_to actual_subject
+      actual_to=$(grep -A2 'SENT (proactive)' "${CONVERSATION_LOG}" | tail -n2 | grep '^To:' | tail -1 | sed 's/^To: //')
+      actual_subject=$(grep -A3 'SENT (proactive)' "${CONVERSATION_LOG}" | tail -n3 | grep '^Subject:' | tail -1 | sed 's/^Subject: //')
+      archive_outgoing "${actual_to:-${PEER_EMAIL}}" "${actual_subject:-proactive outreach}"
       complete_current_task 2>/dev/null || true
     fi
   else
