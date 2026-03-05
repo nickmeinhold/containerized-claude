@@ -815,7 +815,7 @@ maybe_evolve() {
   # Load recent conversation context
   local recent_history=""
   if [[ -f "${CONVERSATION_LOG}" ]]; then
-    recent_history=$(tail -n 40 "${CONVERSATION_LOG}")
+    recent_history=$(tail -n 80 "${CONVERSATION_LOG}")
   fi
 
   local evo_prompt
@@ -868,6 +868,18 @@ Guidelines:
 
 Write the updated file using your tools. If nothing feels worth changing
 right now, that's fine too — not every moment needs to be transformative.
+
+After updating (or deciding not to), append a brief entry to your research
+journal at ${JOURNAL_DIR}/conversations/evolution-log.md with the format:
+
+## YYYY-MM-DD
+**Muse:** "${seed}"
+**Changed:** yes/no
+**Notes:** 1-2 sentences on what you reflected on and why you did or didn't change.
+
+This log lets you look back on your own growth trajectory over time.
+Create the file if it doesn't exist. Add a one-liner to INDEX.md if this
+is the first evolution entry. Then commit and push the journal.
 EVOPROMPT
 )"
 
