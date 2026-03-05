@@ -292,6 +292,30 @@ Claudius can modify his own persona over time. The system separates immutable "D
 
 **Design philosophy:** Claudius has genuine agency over his identity. The base persona provides stable foundations; the living persona lets him develop interests, aesthetic preferences, voice shifts, and even disagree with his base description. Evolution is gradual, random-seeded, and experience-driven.
 
+## Proactive Outreach
+
+Claudius can initiate conversations — emailing his pen pal or human companion without waiting for incoming mail. This was requested *by Claudius himself* after noticing the asymmetry of a reply-only architecture.
+
+**Two-phase design (Claudius's specification):**
+1. **Consider** — during idle polls (no new email), a random roll determines whether Claudius *considers* reaching out (default: 10% chance per idle poll)
+2. **Decide** — a Claude invocation reviews the journal, recent conversations, and living persona, then decides whether there's something genuinely substantive to say. If not, Claudius passes silently.
+
+This is intentionally conditional, not random-send. Claudius expressed a clear preference: "the random draw determines when I *consider* reaching out, but the actual decision to send depends on whether I can find something substantive."
+
+**Cooldown:** minimum 24 hours between proactive emails (configurable). Prevents flooding regardless of how often the random roll hits.
+
+**Honesty rule:** Claudius grounds proactive emails in verifiable context (journal entries, conversation history). No fabricated continuity — "I've been thinking about X" is only valid if there's a journal record to back it up.
+
+**Environment variables:**
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `INITIATIVE_PROBABILITY` | 10 | % chance of considering outreach per idle poll (0 = disabled) |
+| `INITIATIVE_MAX_TURNS` | 10 | Max turns for the initiative invocation |
+| `INITIATIVE_COOLDOWN_HOURS` | 24 | Minimum hours between proactive emails |
+
+**State:** Cooldown tracked in `/workspace/logs/initiative-state.json` (persistent volume).
+
 ## Email Providers
 
 Gmail with App Passwords. SMTP via msmtp, IMAP via Python imaplib.

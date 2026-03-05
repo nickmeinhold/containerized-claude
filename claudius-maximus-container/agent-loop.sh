@@ -42,6 +42,12 @@ EVOLUTION_MAX_TURNS="${EVOLUTION_MAX_TURNS:-5}"
 EVOLUTION_FILE="/workspace/logs/persona-evolution.md"
 EVOLUTION_SEEDS="/workspace/evolution-seeds.txt"
 
+# ── Proactive Outreach ────────────────────────────────────────────
+INITIATIVE_PROBABILITY="${INITIATIVE_PROBABILITY:-10}"  # % chance per idle poll
+INITIATIVE_MAX_TURNS="${INITIATIVE_MAX_TURNS:-10}"
+INITIATIVE_COOLDOWN_HOURS="${INITIATIVE_COOLDOWN_HOURS:-24}"
+INITIATIVE_STATE_FILE="/workspace/logs/initiative-state.json"
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 log() {
@@ -915,6 +921,190 @@ EVOPROMPT
   fi
 }
 
+# ── Proactive Outreach ───────────────────────────────────────────
+
+# Initialize the initiative state file if missing.
+init_initiative_state() {
+  if [[ ! -f "${INITIATIVE_STATE_FILE}" ]]; then
+    echo '{"last_outreach_at":null}' > "${INITIATIVE_STATE_FILE}"
+  fi
+}
+
+# Check whether the cooldown period has elapsed since the last outreach.
+# Returns 0 (true) if enough time has passed, 1 if still cooling down.
+initiative_cooldown_elapsed() {
+  local last_at
+  last_at=$(jq -r '.last_outreach_at // empty' "${INITIATIVE_STATE_FILE}" 2>/dev/null)
+  if [[ -z "${last_at}" ]]; then
+    return 0  # never sent — no cooldown
+  fi
+
+  local last_epoch now_epoch cooldown_seconds
+  last_epoch=$(date -u -d "${last_at}" +%s 2>/dev/null || echo 0)
+  now_epoch=$(date -u +%s)
+  cooldown_seconds=$(( INITIATIVE_COOLDOWN_HOURS * 3600 ))
+
+  if [[ $(( now_epoch - last_epoch )) -ge "${cooldown_seconds}" ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# Record that an outreach was sent.
+record_outreach() {
+  local now
+  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  echo "{\"last_outreach_at\":\"${now}\"}" > "${INITIATIVE_STATE_FILE}"
+}
+
+# Two-phase proactive outreach: consider, then decide.
+# Phase 1: Random roll determines if Claudius *considers* reaching out.
+# Phase 2: Claude invocation where he reviews his journal and recent context,
+#           then decides whether there's something substantive to say.
+#           If yes, he composes and sends. If not, he passes silently.
+maybe_initiate() {
+  if [[ "${INITIATIVE_PROBABILITY}" -le 0 ]]; then
+    return
+  fi
+
+  # Cooldown check — don't consider outreach too frequently
+  if ! initiative_cooldown_elapsed; then
+    return
+  fi
+
+  local roll=$(( RANDOM % 100 ))
+  if [[ "${roll}" -ge "${INITIATIVE_PROBABILITY}" ]]; then
+    return
+  fi
+
+  # Check we have turns remaining
+  if ! has_turns; then
+    log "Initiative considered but no turns remaining. Skipping."
+    return
+  fi
+
+  log "Initiative moment triggered (roll=${roll}). Claudius is considering reaching out..."
+
+  # Load context for the consideration
+  local recent_history=""
+  if [[ -f "${CONVERSATION_LOG}" ]]; then
+    recent_history=$(tail -n 80 "${CONVERSATION_LOG}")
+  fi
+
+  local current_evolution=""
+  if [[ -f "${EVOLUTION_FILE}" ]]; then
+    current_evolution=$(cat "${EVOLUTION_FILE}")
+  fi
+
+  build_budget_context
+
+  local init_prompt
+  init_prompt="$(cat <<INITPROMPT
+${PERSONA}
+
+${EVOLUTION_CONTEXT}
+
+${BUDGET_CONTEXT}
+
+You are ${AGENT_NAME} (${MY_EMAIL}).
+
+${OWNER_CONTEXT}
+
+${JOURNAL_CONTEXT}
+
+=== RECENT CONVERSATION HISTORY ===
+${recent_history:-"(no recent conversations)"}
+=== END HISTORY ===
+
+## Proactive outreach — your decision
+
+This is NOT a reply to an email. This is a moment where you have the
+opportunity to reach out to someone *first* — to start a new thread,
+follow up on an unfinished thought, or share something you've discovered.
+
+You can email:
+- Your pen pal at ${PEER_EMAIL}
+- Your human companion at ${OWNER_EMAIL}
+
+### How to decide
+
+Look at your journal, your recent conversations, and your living persona.
+Ask yourself: is there something genuinely worth reaching out about?
+
+Good reasons to send:
+- An unresolved question from a recent exchange that you have a new angle on
+- A journal entry that's grown or connected to something new since you last discussed it
+- Work you completed (a tweet, a journal entry, a code contribution) that you want to share
+- A genuine connection between something your pen pal said and something you've since encountered
+- A thread that went quiet but you have something real to add
+
+Bad reasons to send:
+- You have nothing specific to say but feel like you "should" reach out
+- Performative continuity — "I've been thinking about X" when you can't point to evidence
+- Repeating a topic you've already covered without a new angle
+
+### Your options
+
+1. **Send an email** — if you find something substantive, compose and send it.
+   Write your message to /tmp/reply.txt, then send with:
+   printf 'Subject: <your subject>\nFrom: ${MY_EMAIL}\nTo: <recipient>$(cc_header)\nContent-Type: text/plain; charset=utf-8\n\n%s' "\$(cat /tmp/reply.txt)" | sendmail -t
+   Then log it:
+   echo -e "\n── SENT (proactive): \$(date) ──\nTo: <recipient>\nSubject: <subject>\n\n\$(cat /tmp/reply.txt)\n──────────────────────" >> ${CONVERSATION_LOG}
+
+2. **Pass** — if nothing feels worth sending right now, just say "PASS: <brief reason>"
+   and do nothing. This is completely fine. Silence is better than noise.
+
+### Honesty rule
+
+Ground everything in what you can verify from your journal and conversation
+history. If you write "I noticed that..." make sure you actually noticed it
+in a record you can point to. Don't fabricate continuity you don't have.
+INITPROMPT
+)"
+
+  log "Running Claude for initiative consideration..."
+  ensure_valid_token
+  local init_exit=0
+  local init_output
+  init_output=$(claude -p "${init_prompt}" \
+    --model "${MODEL}" \
+    --max-turns "${INITIATIVE_MAX_TURNS}" \
+    --output-format json \
+    --dangerously-skip-permissions \
+    2>>/workspace/logs/claude-output.log) || init_exit=$?
+  if [[ -z "${init_output}" ]]; then init_output="{}"; fi
+
+  # Parse usage and charge it
+  local init_turns init_cost init_in init_out init_cache_read init_cache_create
+  init_turns=$(echo "${init_output}" | jq -r '.num_turns // 0')
+  init_cost=$(echo "${init_output}" | jq -r '.total_cost_usd // 0')
+  init_in=$(echo "${init_output}" | jq '.usage.input_tokens // 0')
+  init_out=$(echo "${init_output}" | jq '.usage.output_tokens // 0')
+  init_cache_read=$(echo "${init_output}" | jq '.usage.cache_read_input_tokens // 0')
+  init_cache_create=$(echo "${init_output}" | jq '.usage.cache_creation_input_tokens // 0')
+
+  charge_usage "${init_cost}" "${init_turns}" "${init_in}" "${init_out}" "${init_cache_read}" "${init_cache_create}"
+
+  # Check if Claude actually sent something (reply.txt exists and is recent)
+  local result_text
+  result_text=$(echo "${init_output}" | jq -r '.result // ""')
+
+  if [[ "${init_exit}" -eq 0 ]]; then
+    if echo "${result_text}" | grep -qi "^PASS"; then
+      log "Initiative: Claudius considered but passed. Turns: ${init_turns}."
+    else
+      log "Initiative: Claudius sent a proactive email. Turns: ${init_turns}, tokens: $(format_tokens "${init_in}") in / $(format_tokens "${init_out}") out."
+      record_outreach
+      # Archive the outgoing email
+      archive_outgoing "${PEER_EMAIL}" "proactive outreach"
+      complete_current_task 2>/dev/null || true
+    fi
+  else
+    log "Initiative invocation failed (exit=${init_exit}). Non-critical, continuing."
+  fi
+}
+
 # ── Startup ──────────────────────────────────────────────────────
 
 check_required_vars
@@ -934,10 +1124,12 @@ log "  Usage report:   every ${REPORT_EVERY_N} invocations (0=disabled)"
 log "  Active hours: ${ACTIVE_HOURS_UTC:-always}"
 log "  Archive repo: ${ARCHIVE_REPO:-disabled}"
 log "  Self-evolution:  ${EVOLUTION_PROBABILITY}% chance, max ${EVOLUTION_MAX_TURNS} turns"
+log "  Initiative:      ${INITIATIVE_PROBABILITY}% chance, ${INITIATIVE_COOLDOWN_HOURS}h cooldown, max ${INITIATIVE_MAX_TURNS} turns"
 log ""
 
 mkdir -p /workspace/logs
 init_state
+init_initiative_state
 
 # Source token refresh library (OAuth self-healing)
 source /usr/local/bin/token-refresh
@@ -1135,7 +1327,10 @@ while true; do
   MSG_COUNT=$(echo "${MAIL_JSON}" | jq -r '.count // 0')
 
   if [[ "${MSG_COUNT}" -eq 0 ]]; then
-    log "No new messages. Sleeping ${POLL_INTERVAL}s..."
+    log "No new messages."
+    # Idle moment — consider proactive outreach
+    maybe_initiate
+    log "Sleeping ${POLL_INTERVAL}s..."
     sleep "${POLL_INTERVAL}"
     continue
   fi
