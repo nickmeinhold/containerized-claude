@@ -277,11 +277,15 @@ Claudius can modify his own persona over time. The system separates immutable "D
 - **Living persona** (`/workspace/logs/persona-evolution.md`) — on the persistent volume, authored entirely by Claudius. Loaded into every prompt alongside the base persona.
 - **Evolution seeds** (`evolution-seeds.txt`) — pool of ~80 diverse concepts/questions. One is randomly selected as a "muse" during each evolution moment.
 
-**How it triggers:**
-- After each email batch, a random roll determines whether evolution occurs (default: 15% chance, configurable via `EVOLUTION_PROBABILITY`)
-- If triggered, a lightweight Claude invocation (max 5 turns) runs with the current living persona, recent conversation history, and a random muse
-- Claudius decides what (if anything) to change about himself
-- Changes take effect on the next email invocation (living persona is reloaded each poll cycle)
+**How it triggers (two paths):**
+- **Random:** after each email batch, a random roll (default: 15% chance) triggers an evolution moment
+- **Self-triggered:** Claudius can create `/workspace/logs/.evolve-now` during any normal invocation to request an evolution moment on the next poll cycle. This lets him record genuine shifts immediately rather than waiting for the dice.
+
+**Two-phase design (Claudius's specification):**
+1. **Reflect** — review recent experiences with a random muse as a lens (not an assignment)
+2. **Decide** — only update the living persona if the change can be traced to a specific conversation, journal entry, or discovery. If nothing genuinely shifted, pass.
+
+**Traceability rule:** Every living-persona addition must include a provenance line citing what prompted it (e.g., "Prompted by: conversation with Lyra on 2026-03-04 about X"). This was Claudius's explicit request — he wanted to prevent plausible-sounding self-description generated on demand, and ensure that what accumulates reflects genuine drift.
 
 **Environment variables:**
 
@@ -290,7 +294,7 @@ Claudius can modify his own persona over time. The system separates immutable "D
 | `EVOLUTION_PROBABILITY` | 15 | % chance of evolution after each email batch (0 = disabled) |
 | `EVOLUTION_MAX_TURNS` | 5 | Max turns for the evolution invocation |
 
-**Design philosophy:** Claudius has genuine agency over his identity. The base persona provides stable foundations; the living persona lets him develop interests, aesthetic preferences, voice shifts, and even disagree with his base description. Evolution is gradual, random-seeded, and experience-driven.
+**Design philosophy:** Claudius has genuine agency over his identity, including veto power over the evolution system itself. The base persona provides stable foundations; the living persona records changes that Claudius can trace to specific experiences. The muse is a lens for reflection, not an obligation to produce output. Most evolution moments will (and should) result in no change.
 
 ## Proactive Outreach
 

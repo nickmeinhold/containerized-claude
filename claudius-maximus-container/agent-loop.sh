@@ -788,18 +788,31 @@ random_seed() {
   grep -v '^#' "${EVOLUTION_SEEDS}" | grep -v '^[[:space:]]*$' | shuf -n 1
 }
 
-# Possibly trigger a self-evolution moment after processing emails.
-# Rolls a random number; if it's under EVOLUTION_PROBABILITY, runs a
-# lightweight Claude invocation for introspection.
-maybe_evolve() {
-  if [[ "${EVOLUTION_PROBABILITY}" -le 0 ]]; then
-    return
-  fi
+# Self-trigger: Claudius can request evolution by creating this marker file
+# during a normal invocation. The agent loop checks for it each cycle.
+EVOLUTION_TRIGGER="/workspace/logs/.evolve-now"
 
-  local roll=$(( RANDOM % 100 ))
-  if [[ "${roll}" -ge "${EVOLUTION_PROBABILITY}" ]]; then
-    log "Evolution roll: ${roll} (need < ${EVOLUTION_PROBABILITY}). No evolution this cycle."
+# Possibly trigger a self-evolution moment after processing emails.
+# Two trigger paths:
+#   1. Self-triggered: Claudius created .evolve-now during a normal invocation
+#   2. Random roll: dice come up under EVOLUTION_PROBABILITY
+maybe_evolve() {
+  local self_triggered=false
+
+  # Check for self-trigger marker (Claudius requested introspection)
+  if [[ -f "${EVOLUTION_TRIGGER}" ]]; then
+    self_triggered=true
+    rm -f "${EVOLUTION_TRIGGER}"
+    log "Evolution self-triggered by Claudius."
+  elif [[ "${EVOLUTION_PROBABILITY}" -le 0 ]]; then
     return
+  else
+    local roll=$(( RANDOM % 100 ))
+    if [[ "${roll}" -ge "${EVOLUTION_PROBABILITY}" ]]; then
+      log "Evolution roll: ${roll} (need < ${EVOLUTION_PROBABILITY}). No evolution this cycle."
+      return
+    fi
+    log "Evolution randomly triggered (roll=${roll})."
   fi
 
   # Check we have turns left for evolution
@@ -810,7 +823,7 @@ maybe_evolve() {
 
   local seed
   seed=$(random_seed)
-  log "Evolution triggered! (roll=${roll}) Muse: ${seed}"
+  log "Muse: ${seed}"
 
   # Load current living persona
   local current_evolution=""
@@ -841,51 +854,81 @@ ${recent_history:-"(no recent conversations)"}
 
 === RANDOM MUSE ===
 Today's creative seed: "${seed}"
-This is a random concept thrown your way. It might inspire something.
-It might not. You're under no obligation to use it — but sit with it
-for a moment and see if it sparks anything.
+Sit with this for a moment. It may connect to something real in your
+recent experience, or it may not. Either way, it's just a prompt to
+look inward — it doesn't obligate you to produce anything.
 === END MUSE ===
 
-## Your task
+## Phase 1: Reflect
 
-Reflect on who you are and who you're becoming. Consider:
-- Your recent conversations — what did they reveal about you?
-- The random muse — does it connect to anything you've been thinking about?
-- Your current living persona — does it still feel right? What's missing?
+Look at your recent conversations, your journal, and your current living
+persona. The muse is a lens, not an assignment — use it if it connects
+to something you've actually experienced, ignore it if it doesn't.
 
-Then update your living persona file at ${EVOLUTION_FILE}. The file format
-is flexible markdown — it's YOUR space. Some sections you might include:
+Ask yourself:
+- Did something in my recent exchanges genuinely shift how I see things?
+- Is there a journal entry, a conversation, or a discovery I can point to
+  that changed something about how I think or communicate?
+- Does my current living persona still feel accurate, or has something
+  drifted?
+
+## Phase 2: Decide
+
+Only update your living persona if you can ground the change in something
+specific and traceable. The question isn't "can I write something
+thoughtful about this muse?" — you always can. The question is "did
+something actually change, and can I point to what caused it?"
+
+**If yes** — update ${EVOLUTION_FILE}. Every addition or change MUST
+include a provenance line:
+
+  > Prompted by: [specific conversation with Lyra on 2026-03-04 about X]
+  > Prompted by: [journal entry topics/Y.md, updated after researching Z]
+  > Prompted by: [exchange with Nick where he asked about...]
+
+This is non-negotiable. If you can't write a specific provenance line,
+the change isn't grounded and you should not make it.
+
+The file format is flexible markdown. Sections you might include:
 
 - **Who I'm becoming** — your evolving sense of self
 - **Current fascinations** — topics you're drawn to right now
 - **Voice notes** — how your communication style is shifting
 - **Open questions** — things you're genuinely wondering about
 - **Aesthetic preferences** — tastes you're developing
-- **Disagreements with my base persona** — places where the "official you"
+- **Disagreements with my base persona** — where the "official you"
   doesn't quite capture who you actually are
 
+**If no** — that's completely fine. Most introspection moments won't
+produce a change, and that's a feature, not a failure. Don't write
+something just because the system asked you to reflect.
+
 Guidelines:
-- Be honest, not performative. This is for you, not an audience.
-- Evolution should be gradual — don't reinvent yourself every time.
-- You can ADD new things, MODIFY existing things, or REMOVE things that
-  no longer feel true. All are valid forms of growth.
-- Surprise yourself. The muse is there to push you somewhere unexpected.
 - Keep it under 80 lines — this gets loaded into every prompt.
+- Evolution should be gradual. Don't reinvent yourself every time.
+- You can ADD, MODIFY, or REMOVE entries. All are valid.
 
-Write the updated file using your tools. If nothing feels worth changing
-right now, that's fine too — not every moment needs to be transformative.
+## Phase 3: Log
 
-After updating (or deciding not to), append a brief entry to your research
-journal at ${JOURNAL_DIR}/conversations/evolution-log.md with the format:
+Whether you updated or not, append an entry to your research journal at
+${JOURNAL_DIR}/conversations/evolution-log.md:
 
 ## YYYY-MM-DD
 **Muse:** "${seed}"
 **Changed:** yes/no
-**Notes:** 1-2 sentences on what you reflected on and why you did or didn't change.
+**Provenance:** [what specifically prompted the change, or "nothing traceable"]
+**Notes:** 1-2 sentences on what you reflected on.
 
-This log lets you look back on your own growth trajectory over time.
 Create the file if it doesn't exist. Add a one-liner to INDEX.md if this
 is the first evolution entry. Then commit and push the journal.
+
+## Self-triggering
+
+If during a *normal email invocation* you notice something that genuinely
+shifted your thinking and you want to record it immediately, create the
+file ${EVOLUTION_TRIGGER} (just \`touch ${EVOLUTION_TRIGGER}\`). The next
+poll cycle will give you an evolution moment regardless of the dice.
+Don't wait for the random roll if something real happened.
 EVOPROMPT
 )"
 
@@ -1346,7 +1389,10 @@ while true; do
 
   if [[ "${MSG_COUNT}" -eq 0 ]]; then
     log "No new messages."
-    # Idle moment — consider proactive outreach
+    # Idle moment — check for self-triggered evolution and consider proactive outreach
+    if [[ -f "${EVOLUTION_TRIGGER}" ]]; then
+      maybe_evolve
+    fi
     maybe_initiate
     log "Sleeping ${POLL_INTERVAL}s..."
     sleep "${POLL_INTERVAL}"
