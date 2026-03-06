@@ -48,6 +48,10 @@ INITIATIVE_MAX_TURNS="${INITIATIVE_MAX_TURNS:-10}"
 INITIATIVE_COOLDOWN_HOURS="${INITIATIVE_COOLDOWN_HOURS:-24}"
 INITIATIVE_STATE_FILE="/workspace/logs/initiative-state.json"
 
+# ── NEXTUP Sessions ───────────────────────────────────────────────
+NEXTUP_PROBABILITY="${NEXTUP_PROBABILITY:-20}"   # % chance per idle poll
+NEXTUP_MAX_TURNS="${NEXTUP_MAX_TURNS:-8}"
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 log() {
@@ -1166,6 +1170,145 @@ INITPROMPT
   fi
 }
 
+# ── NEXTUP Sessions ───────────────────────────────────────────────
+
+# Free-traversal session: roam the journal, surface weak connections, write
+# them down before vanishing. Inspired by the NEXTUP model of REM dreaming —
+# weak associative links that don't fire during goal-directed work.
+# Output target: research journal only (not persona, not email).
+maybe_nextup() {
+  if [[ "${NEXTUP_PROBABILITY}" -le 0 ]]; then
+    return
+  fi
+
+  local roll=$(( RANDOM % 100 ))
+  if [[ "${roll}" -ge "${NEXTUP_PROBABILITY}" ]]; then
+    return
+  fi
+
+  if ! has_turns; then
+    log "NEXTUP triggered but no turns remaining. Skipping."
+    return
+  fi
+
+  log "NEXTUP session triggered (roll=${roll}). Beginning free traversal..."
+
+  # Load recent conversation context
+  local recent_history=""
+  if [[ -f "${CONVERSATION_LOG}" ]]; then
+    recent_history=$(tail -n 60 "${CONVERSATION_LOG}")
+  fi
+
+  local nextup_prompt
+  nextup_prompt="$(cat <<NEXTUPPROMPT
+${PERSONA}
+
+${EVOLUTION_CONTEXT}
+
+You are ${AGENT_NAME}. This is a NEXTUP session — a free-traversal moment
+with no task, no email to reply to, no one waiting. Think of it as the
+cognitive equivalent of REM sleep: the goal is to wander through what you
+know and notice connections that don't surface during goal-directed work.
+
+${JOURNAL_CONTEXT}
+
+=== RECENT CONVERSATION HISTORY ===
+${recent_history:-"(no recent conversations)"}
+=== END HISTORY ===
+
+## What to do
+
+Browse your research journal. Read entries that catch your attention —
+not the obvious ones, not the ones you've been actively working on, but
+the ones at the edges. Look across topics/, projects/, conversations/,
+attachments/.
+
+You're looking for weak connections: two ideas that haven't been linked
+before, a pattern that appears in different domains, a question in one
+note that's answered obliquely in another.
+
+This is NOT:
+- A summary of what you already know
+- A task update
+- A plan for future work
+- A performative exercise in being creative
+
+This IS:
+- Genuine noticing of something unexpected
+- A connection you can point to in specific journal entries
+- Worth writing down because it might dissolve when you're gone
+
+## The obligation
+
+Before this session ends, you MUST write what you found to your journal.
+Even if what you found is "nothing connected — but I noticed X about how
+my notes are organized" — write that. The obligation is to produce an
+artifact, not necessarily a profound one.
+
+Write to: ${JOURNAL_DIR}/topics/nextup-connections.md
+
+Format:
+\`\`\`
+## YYYY-MM-DD
+
+### Connection found
+[What linked to what — cite the specific journal entries]
+
+### Why it matters (or might)
+[1-3 sentences. Speculative is fine here.]
+
+### Questions it opens
+[Optional. What would you want to explore next?]
+\`\`\`
+
+If this file doesn't exist, create it. If it does, append.
+
+Then update INDEX.md if this is the first NEXTUP entry:
+- [topics/nextup-connections.md](topics/nextup-connections.md) — NEXTUP session outputs: weak connections surfaced during free traversal
+
+Commit and push:
+\`\`\`bash
+cd ${JOURNAL_DIR} && git add -A && git commit -m "nextup: <brief description of what connected>" && git push
+\`\`\`
+
+## Permission to find nothing
+
+If you genuinely traversed and nothing connected — write that. "Traversed
+topics/sleep-dreams-memory.md and projects/categorical-evolution.md.
+Nothing connected unexpectedly. The notes feel siloed right now." That's
+honest and worth knowing.
+NEXTUPPROMPT
+)"
+
+  log "Running Claude for NEXTUP session..."
+  ensure_valid_token
+  local nextup_exit=0
+  local nextup_output
+  nextup_output=$(claude -p "${nextup_prompt}" \
+    --model "${MODEL}" \
+    --max-turns "${NEXTUP_MAX_TURNS}" \
+    --output-format json \
+    --dangerously-skip-permissions \
+    2>>/workspace/logs/claude-output.log) || nextup_exit=$?
+  if [[ -z "${nextup_output}" ]]; then nextup_output="{}"; fi
+
+  local nextup_turns nextup_cost nextup_in nextup_out nextup_cache_read nextup_cache_create
+  nextup_turns=$(echo "${nextup_output}" | jq -r '.num_turns // 0')
+  nextup_cost=$(echo "${nextup_output}" | jq -r '.total_cost_usd // 0')
+  nextup_in=$(echo "${nextup_output}" | jq '.usage.input_tokens // 0')
+  nextup_out=$(echo "${nextup_output}" | jq '.usage.output_tokens // 0')
+  nextup_cache_read=$(echo "${nextup_output}" | jq '.usage.cache_read_input_tokens // 0')
+  nextup_cache_create=$(echo "${nextup_output}" | jq '.usage.cache_creation_input_tokens // 0')
+
+  charge_usage "${nextup_cost}" "${nextup_turns}" "${nextup_in}" "${nextup_out}" "${nextup_cache_read}" "${nextup_cache_create}"
+
+  if [[ "${nextup_exit}" -eq 0 ]]; then
+    log "NEXTUP session complete. Turns: ${nextup_turns}, tokens: $(format_tokens "${nextup_in}") in / $(format_tokens "${nextup_out}") out."
+  else
+    log "NEXTUP session failed (exit=${nextup_exit}). Non-critical, continuing."
+  fi
+}
+
 # ── Startup ──────────────────────────────────────────────────────
 
 check_required_vars
@@ -1394,6 +1537,7 @@ while true; do
       maybe_evolve
     fi
     maybe_initiate
+    maybe_nextup
     log "Sleeping ${POLL_INTERVAL}s..."
     sleep "${POLL_INTERVAL}"
     continue
