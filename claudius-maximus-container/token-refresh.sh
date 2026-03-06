@@ -141,7 +141,7 @@ refresh_token() {
 # Safe to call frequently — no-ops when token is still valid.
 ensure_valid_token() {
   if token_needs_refresh; then
-    refresh_token
+    refresh_token || log "token-refresh: Pre-check refresh failed — will retry after Claude invocation"
   fi
 }
 
