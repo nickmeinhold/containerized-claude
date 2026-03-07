@@ -52,45 +52,80 @@ fi
 
 # ── Claude credentials ────────────────────────────────────────────
 # Priority chain for OAuth credentials:
-#   1. If CLAUDE_CREDENTIALS_JSON has a DIFFERENT refresh token than the
-#      persisted file → operator pushed fresh creds → use the secret
-#   2. If persisted file exists → use it (may contain refreshed tokens)
-#   3. If secret exists → seed both persisted and active files
+#   1. CLAUDE_REFRESH_TOKEN set + differs from persisted → bootstrap fresh
+#   2. Persisted file exists → use it (tokens refreshed at runtime)
+#   3. CLAUDE_CREDENTIALS_JSON → legacy full-JSON path (backward compat)
 #   4. Else → warn (bind-mount or API key path)
-CRED_FILE="${HOME}/.claude/.credentials.json"
-PERSISTENT_CRED="/workspace/persistent/claude-credentials.json"
+#
+# The refresh-token-first approach (like xdeca-pm-bot) avoids the stale
+# credentials problem: refresh tokens are single-use, so snapshotting a
+# full credentials JSON at deploy time races with local token refreshes.
+# By deploying just the refresh token and bootstrapping on startup, the
+# container gets its own fresh token pair immediately.
+# Source token-refresh library for bootstrap_from_refresh_token()
+# (also defines CRED_FILE and PERSISTENT_CRED)
+source /usr/local/bin/token-refresh
 
-if [[ -n "${CLAUDE_CREDENTIALS_JSON:-}" ]]; then
+CRED_RESOLVED=false
+
+# ── Path 1: CLAUDE_REFRESH_TOKEN (preferred) ────────────────────
+if [[ -n "${CLAUDE_REFRESH_TOKEN:-}" ]]; then
+  PERSISTED_RT=""
   if [[ -f "${PERSISTENT_CRED}" ]]; then
-    # Compare refresh tokens: if different, operator pushed fresh creds
-    SECRET_RT=$(printf '%s' "${CLAUDE_CREDENTIALS_JSON}" | jq -r '.claudeAiOauth.refreshToken // .refreshToken // empty' 2>/dev/null)
-    PERSISTED_RT=$(jq -r '.claudeAiOauth.refreshToken // .refreshToken // empty' "${PERSISTENT_CRED}" 2>/dev/null)
-    if [[ -n "${SECRET_RT}" && "${SECRET_RT}" != "${PERSISTED_RT}" ]]; then
-      echo "[entrypoint] Secret has newer credentials — updating persisted file"
-      printf '%s\n' "${CLAUDE_CREDENTIALS_JSON}" > "${PERSISTENT_CRED}"
-    fi
-    cp "${PERSISTENT_CRED}" "${CRED_FILE}"
-    echo "[entrypoint] Loaded credentials from persistent volume"
-  else
-    # First deploy: seed both from the secret
-    printf '%s\n' "${CLAUDE_CREDENTIALS_JSON}" > "${CRED_FILE}"
-    if [[ -d "/workspace/persistent" ]]; then
-      cp "${CRED_FILE}" "${PERSISTENT_CRED}"
-      echo "[entrypoint] Seeded persistent credentials from secret"
-    fi
-    echo "[entrypoint] Wrote credentials from CLAUDE_CREDENTIALS_JSON"
+    PERSISTED_RT=$(jq -r '.claudeAiOauth.refreshToken // empty' "${PERSISTENT_CRED}" 2>/dev/null)
   fi
-elif [[ -f "${PERSISTENT_CRED}" ]]; then
-  # No secret but persisted file exists (e.g., bind-mount was removed)
+
+  if [[ -n "${PERSISTED_RT}" && "${CLAUDE_REFRESH_TOKEN}" == "${PERSISTED_RT}" ]]; then
+    # Same token as persisted — runtime has already refreshed past this
+    cp "${PERSISTENT_CRED}" "${CRED_FILE}"
+    echo "[entrypoint] Loaded credentials from persistent volume (refresh token unchanged)"
+    CRED_RESOLVED=true
+  elif [[ -n "${PERSISTED_RT}" && "${CLAUDE_REFRESH_TOKEN}" != "${PERSISTED_RT}" ]]; then
+    # Operator pushed a new refresh token — bootstrap fresh
+    echo "[entrypoint] New refresh token detected — bootstrapping fresh credentials..."
+    if bootstrap_from_refresh_token "${CLAUDE_REFRESH_TOKEN}"; then
+      echo "[entrypoint] Bootstrapped fresh credentials from CLAUDE_REFRESH_TOKEN"
+      CRED_RESOLVED=true
+    else
+      echo "[entrypoint] WARNING: Bootstrap failed — falling back to persisted credentials"
+      cp "${PERSISTENT_CRED}" "${CRED_FILE}"
+      CRED_RESOLVED=true
+    fi
+  else
+    # No persisted file — first deploy
+    echo "[entrypoint] First deploy — bootstrapping credentials from CLAUDE_REFRESH_TOKEN..."
+    if bootstrap_from_refresh_token "${CLAUDE_REFRESH_TOKEN}"; then
+      echo "[entrypoint] Bootstrapped fresh credentials from CLAUDE_REFRESH_TOKEN"
+      CRED_RESOLVED=true
+    else
+      echo "[entrypoint] WARNING: Bootstrap failed from CLAUDE_REFRESH_TOKEN"
+    fi
+  fi
+fi
+
+# ── Path 2: Persisted credentials (runtime-refreshed) ───────────
+if [[ "${CRED_RESOLVED}" != true && -f "${PERSISTENT_CRED}" ]]; then
   cp "${PERSISTENT_CRED}" "${CRED_FILE}"
-  echo "[entrypoint] Loaded credentials from persistent volume (no secret set)"
+  echo "[entrypoint] Loaded credentials from persistent volume"
+  CRED_RESOLVED=true
+fi
+
+# ── Path 3: CLAUDE_CREDENTIALS_JSON (legacy backward compat) ────
+if [[ "${CRED_RESOLVED}" != true && -n "${CLAUDE_CREDENTIALS_JSON:-}" ]]; then
+  printf '%s\n' "${CLAUDE_CREDENTIALS_JSON}" > "${CRED_FILE}"
+  if [[ -d "/workspace/persistent" ]]; then
+    cp "${CRED_FILE}" "${PERSISTENT_CRED}"
+    echo "[entrypoint] Seeded persistent credentials from CLAUDE_CREDENTIALS_JSON"
+  fi
+  echo "[entrypoint] Wrote credentials from CLAUDE_CREDENTIALS_JSON (legacy path)"
+  CRED_RESOLVED=true
 fi
 
 if [[ -f "${CRED_FILE}" ]]; then
   echo "[entrypoint] Found credentials at ${CRED_FILE}"
 else
   echo "[entrypoint] WARNING: No credentials file at ${CRED_FILE}"
-  echo "[entrypoint] Mount .claude-credentials.json, set CLAUDE_CREDENTIALS_JSON, or set ANTHROPIC_API_KEY"
+  echo "[entrypoint] Set CLAUDE_REFRESH_TOKEN, CLAUDE_CREDENTIALS_JSON, or ANTHROPIC_API_KEY"
 fi
 
 # Configure git identity

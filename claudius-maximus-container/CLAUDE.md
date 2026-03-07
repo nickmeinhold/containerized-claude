@@ -68,43 +68,45 @@ Dashboard: https://fly.io/apps/claudius-maximus
 The entrypoint auto-detects Fly.io (persistent volume at `/workspace/persistent`) and:
 - Symlinks `logs/` and `repos/` into the volume for persistence
 - Generates `/etc/msmtprc` from `SMTP_HOST` / `IMAP_PASS` env vars (no bind mount needed)
-- Writes Claude credentials from `CLAUDE_CREDENTIALS_JSON` secret
+- Bootstraps Claude credentials from `CLAUDE_REFRESH_TOKEN` secret
 
 See `fly.toml` and `deploy-fly.sh` for details.
 
 ## Auth
 
 - **Docker Compose**: OAuth credentials extracted from macOS Keychain → bind-mounted at `~/.claude/.credentials.json`
-- **Fly.io**: Credentials set as `CLAUDE_CREDENTIALS_JSON` secret → written to file at startup
-- On macOS: `security find-generic-password -s "Claude Code-credentials" -w`
+- **Fly.io**: Refresh token set as `CLAUDE_REFRESH_TOKEN` secret → bootstraps fresh credentials on startup
+- On macOS: `security find-generic-password -s "Claude Code-credentials" -w` (full JSON; deploy script extracts refresh token)
 - On Linux: Claude Code reads from `~/.claude/.credentials.json` (NOT `~/.claude.json`)
 
 ## Token Refresh (OAuth Self-Healing)
 
 Claude Code does not refresh OAuth tokens in headless mode (`claude -p`). Access tokens expire every ~8 hours. The agent handles this automatically via `token-refresh.sh`:
 
-**How it works:**
+**Bootstrap (startup):**
+- `deploy-fly.sh` extracts just the refresh token from macOS Keychain and pushes it as `CLAUDE_REFRESH_TOKEN`
+- On startup, `entrypoint.sh` calls `bootstrap_from_refresh_token()` which POSTs to the Anthropic OAuth endpoint, gets a fresh access token + new refresh token, and writes the full credentials file
+- This avoids the stale-credentials problem: since refresh tokens are single-use, snapshotting a full credentials JSON at deploy time races with local token refreshes (same approach as xdeca-pm-bot)
+
+**Runtime:**
 - **Proactive check** (`ensure_valid_token`): called before every Claude invocation. If the token expires within 30 minutes, refreshes it preemptively.
 - **Reactive retry** (`is_auth_error`): if Claude fails with an OAuth error, refreshes the token and retries once (doesn't count as a task retry).
 - **Atomic writes**: new tokens are written to a temp file then `mv`'d to prevent corruption from partial writes. Refresh tokens are **single-use** — the old one is invalidated after each refresh.
 - **Persistent credentials**: tokens are written to both `~/.claude/.credentials.json` (active) and `/workspace/persistent/claude-credentials.json` (survives container restarts).
 
 **Credential priority on startup** (`entrypoint.sh`):
-1. If `CLAUDE_CREDENTIALS_JSON` secret has a **different** refresh token than the persisted file → operator pushed fresh creds → use the secret
-2. If persisted file exists → use it (may contain tokens refreshed since last deploy)
-3. If only the secret exists → seed both persisted and active files
+1. `CLAUDE_REFRESH_TOKEN` set + differs from persisted → bootstrap fresh credentials via OAuth
+2. Persisted file exists → use it (tokens already refreshed at runtime)
+3. `CLAUDE_CREDENTIALS_JSON` → legacy full-JSON path (backward compat)
 4. Else → warn (bind-mount or API key path)
 
 **OAuth endpoint:** `POST https://console.anthropic.com/v1/oauth/token` with Claude Code's public client ID.
 
 **Manual fallback** (if refresh itself fails — e.g., refresh token revoked):
 ```bash
-# On macOS: extract fresh credentials
-security find-generic-password -s "Claude Code-credentials" -w | pbcopy
-
-# Push to Fly.io
+# Push fresh refresh token to Fly.io
 cd claudius-maximus-container
-./deploy-fly.sh --secrets   # updates CLAUDE_CREDENTIALS_JSON
+./deploy-fly.sh --secrets   # extracts from Keychain, pushes CLAUDE_REFRESH_TOKEN
 ```
 
 Owner is notified via email when token refresh fails, with manual fix instructions.

@@ -39,13 +39,30 @@ grep -q '^SMTP_HOST=' "${SECRETS_FILE}" || echo "SMTP_HOST=smtp.gmail.com" >> "$
 grep -q '^SMTP_PORT=' "${SECRETS_FILE}" || echo "SMTP_PORT=587" >> "${SECRETS_FILE}"
 # SMTP_USER and SMTP_PASS default to MY_EMAIL and IMAP_PASS in entrypoint
 
-# Add Claude credentials JSON
-if [[ -f .claude-credentials.json ]]; then
-  # fly secrets import handles multi-line values when quoted
-  printf 'CLAUDE_CREDENTIALS_JSON=%s\n' "$(cat .claude-credentials.json)" >> "${SECRETS_FILE}"
-  echo "Loaded Claude credentials from .claude-credentials.json"
+# Extract Claude refresh token — prefer macOS Keychain, fall back to file.
+# Only the refresh token is needed; the container bootstraps fresh access
+# tokens on startup (like xdeca-pm-bot). This avoids the stale-credentials
+# problem caused by snapshotting a full credentials JSON.
+REFRESH_TOKEN=""
+if [[ "$(uname)" == "Darwin" ]]; then
+  CRED_JSON=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
+  if [[ -n "${CRED_JSON}" ]]; then
+    REFRESH_TOKEN=$(printf '%s' "${CRED_JSON}" | jq -r '.claudeAiOauth.refreshToken // empty' 2>/dev/null)
+    if [[ -n "${REFRESH_TOKEN}" ]]; then
+      echo "Extracted refresh token from macOS Keychain"
+    fi
+  fi
+fi
+if [[ -z "${REFRESH_TOKEN}" && -f .claude-credentials.json ]]; then
+  REFRESH_TOKEN=$(jq -r '.claudeAiOauth.refreshToken // empty' .claude-credentials.json 2>/dev/null)
+  if [[ -n "${REFRESH_TOKEN}" ]]; then
+    echo "Extracted refresh token from .claude-credentials.json"
+  fi
+fi
+if [[ -n "${REFRESH_TOKEN}" ]]; then
+  printf 'CLAUDE_REFRESH_TOKEN=%s\n' "${REFRESH_TOKEN}" >> "${SECRETS_FILE}"
 else
-  echo "WARNING: .claude-credentials.json not found."
+  echo "WARNING: No Claude refresh token found."
   echo "Set ANTHROPIC_API_KEY in .env or provide credentials later."
 fi
 
