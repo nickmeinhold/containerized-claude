@@ -11,6 +11,12 @@
 # Usage: source /usr/local/bin/token-refresh
 # ─────────────────────────────────────────────────────────────────
 
+# Provide a log() fallback if not already defined (e.g., when sourced
+# from entrypoint.sh before agent-loop.sh defines its own log function).
+if ! declare -f log &>/dev/null; then
+  log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
+fi
+
 # Claude Code's public OAuth client ID (hardcoded in the CLI)
 OAUTH_CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_TOKEN_URL="https://console.anthropic.com/v1/oauth/token"
@@ -21,6 +27,78 @@ PERSISTENT_CRED="/workspace/persistent/claude-credentials.json"
 
 # Refresh 30 minutes before actual expiry to avoid races
 REFRESH_MARGIN_MS=$((30 * 60 * 1000))
+
+# ── bootstrap_from_refresh_token ──────────────────────────────
+# Creates a fresh credentials file from a bare refresh token.
+# Calls the OAuth endpoint, builds the full credentials JSON,
+# and writes it to both active and persistent paths.
+# Returns 0 on success, 1 on failure.
+bootstrap_from_refresh_token() {
+  local refresh_token="$1"
+
+  if [[ -z "${refresh_token}" ]]; then
+    log "token-refresh: bootstrap — no refresh token provided"
+    return 1
+  fi
+
+  log "token-refresh: Bootstrapping credentials from refresh token..."
+
+  local request_body
+  request_body=$(jq -n \
+    --arg grant_type "refresh_token" \
+    --arg refresh_token "${refresh_token}" \
+    --arg client_id "${OAUTH_CLIENT_ID}" \
+    '{grant_type: $grant_type, refresh_token: $refresh_token, client_id: $client_id}')
+
+  local response http_code
+  response=$(curl -s --max-time 10 -w "\n%{http_code}" \
+    -X POST "${OAUTH_TOKEN_URL}" \
+    -H "Content-Type: application/json" \
+    -d "${request_body}" \
+    2>/dev/null)
+
+  http_code=$(echo "${response}" | tail -n1)
+  response=$(echo "${response}" | sed '$d')
+
+  if [[ "${http_code}" != "200" ]]; then
+    local error_msg
+    error_msg=$(echo "${response}" | jq -r '.error // .message // "unknown error"' 2>/dev/null || echo "HTTP ${http_code}")
+    log "token-refresh: Bootstrap failed (HTTP ${http_code}): ${error_msg}"
+    return 1
+  fi
+
+  local new_access_token new_refresh_token expires_in
+  new_access_token=$(echo "${response}" | jq -r '.access_token // empty')
+  new_refresh_token=$(echo "${response}" | jq -r '.refresh_token // empty')
+  expires_in=$(echo "${response}" | jq -r '.expires_in // empty')
+
+  if [[ -z "${new_access_token}" || -z "${new_refresh_token}" ]]; then
+    log "token-refresh: Bootstrap response missing tokens"
+    return 1
+  fi
+
+  local new_expires_at
+  new_expires_at=$(( $(date -u +%s) * 1000 + ${expires_in:-28800} * 1000 ))
+
+  # Build the full credentials JSON from scratch
+  mkdir -p "$(dirname "${CRED_FILE}")"
+  jq -n \
+    --arg at "${new_access_token}" \
+    --arg rt "${new_refresh_token}" \
+    --argjson ea "${new_expires_at}" \
+    '{claudeAiOauth: {accessToken: $at, refreshToken: $rt, expiresAt: $ea}}' \
+    > "${CRED_FILE}.tmp" && mv "${CRED_FILE}.tmp" "${CRED_FILE}"
+
+  # Also persist to the volume (survives container restarts on Fly.io)
+  if [[ -d "/workspace/persistent" ]]; then
+    cp "${CRED_FILE}" "${PERSISTENT_CRED}.tmp" && mv "${PERSISTENT_CRED}.tmp" "${PERSISTENT_CRED}"
+  fi
+
+  local expires_in_hrs
+  expires_in_hrs=$(( ${expires_in:-28800} / 3600 ))
+  log "token-refresh: Bootstrap successful — fresh tokens (valid for ~${expires_in_hrs}h)"
+  return 0
+}
 
 # ── token_needs_refresh ────────────────────────────────────────
 # Returns 0 (true) if the token is expired or within the refresh

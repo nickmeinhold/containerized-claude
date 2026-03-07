@@ -39,23 +39,30 @@ grep -q '^SMTP_HOST=' "${SECRETS_FILE}" || echo "SMTP_HOST=smtp.gmail.com" >> "$
 grep -q '^SMTP_PORT=' "${SECRETS_FILE}" || echo "SMTP_PORT=587" >> "${SECRETS_FILE}"
 # SMTP_USER and SMTP_PASS default to MY_EMAIL and IMAP_PASS in entrypoint
 
-# Add Claude credentials JSON — prefer macOS Keychain (always fresh),
-# fall back to .claude-credentials.json file (may be stale).
-CRED_JSON=""
+# Extract Claude refresh token — prefer macOS Keychain, fall back to file.
+# Only the refresh token is needed; the container bootstraps fresh access
+# tokens on startup (like xdeca-pm-bot). This avoids the stale-credentials
+# problem caused by snapshotting a full credentials JSON.
+REFRESH_TOKEN=""
 if [[ "$(uname)" == "Darwin" ]]; then
   CRED_JSON=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
   if [[ -n "${CRED_JSON}" ]]; then
-    echo "Loaded Claude credentials from macOS Keychain (fresh)"
+    REFRESH_TOKEN=$(printf '%s' "${CRED_JSON}" | jq -r '.claudeAiOauth.refreshToken // empty' 2>/dev/null)
+    if [[ -n "${REFRESH_TOKEN}" ]]; then
+      echo "Extracted refresh token from macOS Keychain"
+    fi
   fi
 fi
-if [[ -z "${CRED_JSON}" && -f .claude-credentials.json ]]; then
-  CRED_JSON=$(cat .claude-credentials.json)
-  echo "Loaded Claude credentials from .claude-credentials.json (may be stale)"
+if [[ -z "${REFRESH_TOKEN}" && -f .claude-credentials.json ]]; then
+  REFRESH_TOKEN=$(jq -r '.claudeAiOauth.refreshToken // empty' .claude-credentials.json 2>/dev/null)
+  if [[ -n "${REFRESH_TOKEN}" ]]; then
+    echo "Extracted refresh token from .claude-credentials.json"
+  fi
 fi
-if [[ -n "${CRED_JSON}" ]]; then
-  printf 'CLAUDE_CREDENTIALS_JSON=%s\n' "${CRED_JSON}" >> "${SECRETS_FILE}"
+if [[ -n "${REFRESH_TOKEN}" ]]; then
+  printf 'CLAUDE_REFRESH_TOKEN=%s\n' "${REFRESH_TOKEN}" >> "${SECRETS_FILE}"
 else
-  echo "WARNING: No Claude credentials found."
+  echo "WARNING: No Claude refresh token found."
   echo "Set ANTHROPIC_API_KEY in .env or provide credentials later."
 fi
 
