@@ -39,13 +39,23 @@ grep -q '^SMTP_HOST=' "${SECRETS_FILE}" || echo "SMTP_HOST=smtp.gmail.com" >> "$
 grep -q '^SMTP_PORT=' "${SECRETS_FILE}" || echo "SMTP_PORT=587" >> "${SECRETS_FILE}"
 # SMTP_USER and SMTP_PASS default to MY_EMAIL and IMAP_PASS in entrypoint
 
-# Add Claude credentials JSON
-if [[ -f .claude-credentials.json ]]; then
-  # fly secrets import handles multi-line values when quoted
-  printf 'CLAUDE_CREDENTIALS_JSON=%s\n' "$(cat .claude-credentials.json)" >> "${SECRETS_FILE}"
-  echo "Loaded Claude credentials from .claude-credentials.json"
+# Add Claude credentials JSON — prefer macOS Keychain (always fresh),
+# fall back to .claude-credentials.json file (may be stale).
+CRED_JSON=""
+if [[ "$(uname)" == "Darwin" ]]; then
+  CRED_JSON=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)
+  if [[ -n "${CRED_JSON}" ]]; then
+    echo "Loaded Claude credentials from macOS Keychain (fresh)"
+  fi
+fi
+if [[ -z "${CRED_JSON}" && -f .claude-credentials.json ]]; then
+  CRED_JSON=$(cat .claude-credentials.json)
+  echo "Loaded Claude credentials from .claude-credentials.json (may be stale)"
+fi
+if [[ -n "${CRED_JSON}" ]]; then
+  printf 'CLAUDE_CREDENTIALS_JSON=%s\n' "${CRED_JSON}" >> "${SECRETS_FILE}"
 else
-  echo "WARNING: .claude-credentials.json not found."
+  echo "WARNING: No Claude credentials found."
   echo "Set ANTHROPIC_API_KEY in .env or provide credentials later."
 fi
 

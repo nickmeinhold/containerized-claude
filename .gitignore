@@ -12,6 +12,10 @@ claude-config/
 # Runtime artifacts
 workspace/
 agent-logs/
+__pycache__/
+
+# MCP cache
+.playwright-mcp/
 
 # Session capture artifacts
 playwright-storage.json
