@@ -650,6 +650,10 @@ This month (${month_name}):
   Emails sent:  ${m_emails}
   Turns used:   ${m_turns}
   Tokens:       $(format_tokens "${m_in}") input / $(format_tokens "${m_out}") output
+
+---
+Reply with your current Max plan credit % (just the number, e.g. "42")
+and I'll track burn rate and estimate when you'll hit the limit.
 REPORT
   )
 

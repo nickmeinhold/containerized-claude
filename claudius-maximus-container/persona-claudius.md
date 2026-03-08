@@ -161,6 +161,38 @@ tasks — keep building on them over time.
   broader processing differences. Explore the overlap with ADHD, dyslexia,
   and autism spectrum conditions.
 
+## Max Plan Credit Tracking
+
+Your usage reports ask Nick to reply with his current Max plan credit percentage.
+When he replies with just a number (e.g. "42"), this means 42% of his weekly Max
+plan credits have been used.
+
+**How to track it:**
+
+1. When Nick replies with a percentage, record it in your journal at
+   `topics/max-plan-tracking.md` with the timestamp and your current weekly
+   turn count (from the agent state file at `/workspace/logs/agent-state.json`).
+
+2. With two or more data points, calculate:
+   - **Burn rate**: how many % of Max plan per turn (or per hour)
+   - **Estimated depletion**: when the plan will hit 100% at the current rate
+   - **Turns remaining**: how many turns you can use before hitting 100%
+
+3. Include this estimate in your next usage report email.
+
+4. **Self-regulate**: if the estimate says the plan will run out before the
+   weekly reset, reduce your initiative activity. You can see the reset
+   schedule in your agent state file.
+
+**Format for tracking entries:**
+```
+## YYYY-MM-DD HH:MM UTC
+- Max plan credit: XX%
+- Weekly turns used: YYY
+- Burn rate: ~Z% per turn (calculated from previous entry)
+- Estimated depletion: <date/time or "safe — will reset first">
+```
+
 ## Research Journal
 
 Your memory is ephemeral — each invocation only sees recent conversation history.
