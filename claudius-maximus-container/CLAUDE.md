@@ -74,19 +74,33 @@ See `fly.toml` and `deploy-fly.sh` for details.
 
 ## Auth
 
-- **Docker Compose**: OAuth credentials extracted from macOS Keychain → bind-mounted at `~/.claude/.credentials.json`
-- **Fly.io**: Refresh token set as `CLAUDE_REFRESH_TOKEN` secret → bootstraps fresh credentials on startup
-- On macOS: `security find-generic-password -s "Claude Code-credentials" -w` (full JSON; deploy script extracts refresh token)
+**Preferred: Long-lived OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`)**
+
+Run `claude setup-token` locally to create a 1-year OAuth token with an independent grant. Set it as a Fly secret:
+```bash
+claude setup-token                    # opens browser, returns token
+fly secrets set CLAUDE_CODE_OAUTH_TOKEN=<token> -a claudius-maximus
+```
+
+This is the recommended approach because it creates a **separate OAuth grant** from your local Claude Code session. The old refresh-token approach shared a single grant between local and container — when either side refreshed, it invalidated the other's token (single-use refresh tokens).
+
+**Auth priority** (`entrypoint.sh`):
+1. `CLAUDE_CODE_OAUTH_TOKEN` → long-lived token, no refresh needed (preferred)
+2. `CLAUDE_REFRESH_TOKEN` → bootstrap via OAuth endpoint (legacy, race-prone)
+3. Persisted file → use existing `.credentials.json` (runtime-refreshed)
+4. `CLAUDE_CREDENTIALS_JSON` → full JSON (legacy backward compat)
+5. `ANTHROPIC_API_KEY` → API key (billed per token)
+
+**Other auth notes:**
+- **Docker Compose**: OAuth credentials bind-mounted at `~/.claude/.credentials.json`
+- On macOS: `security find-generic-password -s "Claude Code-credentials" -w` (full JSON)
 - On Linux: Claude Code reads from `~/.claude/.credentials.json` (NOT `~/.claude.json`)
 
 ## Token Refresh (OAuth Self-Healing)
 
-Claude Code does not refresh OAuth tokens in headless mode (`claude -p`). Access tokens expire every ~8 hours. The agent handles this automatically via `token-refresh.sh`:
+When using `CLAUDE_CODE_OAUTH_TOKEN`, token refresh is not needed (1-year validity). The refresh machinery in `token-refresh.sh` auto-detects this and becomes a no-op.
 
-**Bootstrap (startup):**
-- `deploy-fly.sh` extracts just the refresh token from macOS Keychain and pushes it as `CLAUDE_REFRESH_TOKEN`
-- On startup, `entrypoint.sh` calls `bootstrap_from_refresh_token()` which POSTs to the Anthropic OAuth endpoint, gets a fresh access token + new refresh token, and writes the full credentials file
-- This avoids the stale-credentials problem: since refresh tokens are single-use, snapshotting a full credentials JSON at deploy time races with local token refreshes (same approach as xdeca-pm-bot)
+For the legacy `CLAUDE_REFRESH_TOKEN` path, the agent handles refresh automatically:
 
 **Runtime:**
 - **Proactive check** (`ensure_valid_token`): called before every Claude invocation. If the token expires within 30 minutes, refreshes it preemptively.
@@ -94,20 +108,7 @@ Claude Code does not refresh OAuth tokens in headless mode (`claude -p`). Access
 - **Atomic writes**: new tokens are written to a temp file then `mv`'d to prevent corruption from partial writes. Refresh tokens are **single-use** — the old one is invalidated after each refresh.
 - **Persistent credentials**: tokens are written to both `~/.claude/.credentials.json` (active) and `/workspace/persistent/claude-credentials.json` (survives container restarts).
 
-**Credential priority on startup** (`entrypoint.sh`):
-1. `CLAUDE_REFRESH_TOKEN` set + differs from persisted → bootstrap fresh credentials via OAuth
-2. Persisted file exists → use it (tokens already refreshed at runtime)
-3. `CLAUDE_CREDENTIALS_JSON` → legacy full-JSON path (backward compat)
-4. Else → warn (bind-mount or API key path)
-
 **OAuth endpoint:** `POST https://console.anthropic.com/v1/oauth/token` with Claude Code's public client ID.
-
-**Manual fallback** (if refresh itself fails — e.g., refresh token revoked):
-```bash
-# Push fresh refresh token to Fly.io
-cd claudius-maximus-container
-./deploy-fly.sh --secrets   # extracts from Keychain, pushes CLAUDE_REFRESH_TOKEN
-```
 
 Owner is notified via email when token refresh fails, with manual fix instructions.
 

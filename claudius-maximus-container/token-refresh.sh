@@ -17,6 +17,15 @@ if ! declare -f log &>/dev/null; then
   log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*"; }
 fi
 
+# ── Long-lived OAuth token (setup-token) ─────────────────────────
+# If CLAUDE_CODE_OAUTH_TOKEN is set, Claude Code uses it directly and
+# bypasses .credentials.json entirely. No refresh needed (1-year token).
+# All refresh functions become no-ops.
+OAUTH_TOKEN_MODE=false
+if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+  OAUTH_TOKEN_MODE=true
+fi
+
 # Claude Code's public OAuth client ID (hardcoded in the CLI)
 OAUTH_CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_TOKEN_URL="https://console.anthropic.com/v1/oauth/token"
@@ -137,6 +146,10 @@ bootstrap_from_refresh_token() {
 # Returns 0 (true) if the token is expired or within the refresh
 # margin. Returns 1 (false) if the token is still valid.
 token_needs_refresh() {
+  if [[ "${OAUTH_TOKEN_MODE}" == true ]]; then
+    return 1  # long-lived token, no refresh needed
+  fi
+
   if [[ ! -f "${CRED_FILE}" ]]; then
     log "token-refresh: No credentials file found"
     return 0  # needs refresh (or at least, something is wrong)
@@ -171,6 +184,10 @@ token_needs_refresh() {
 # the file in place (preserving any extra fields).
 # Returns 0 on success, 1 on failure.
 refresh_token() {
+  if [[ "${OAUTH_TOKEN_MODE}" == true ]]; then
+    return 0  # long-lived token, no refresh needed
+  fi
+
   if [[ ! -f "${CRED_FILE}" ]]; then
     log "token-refresh: Cannot refresh — no credentials file"
     return 1

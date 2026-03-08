@@ -51,25 +51,32 @@ MSMTP
 fi
 
 # ── Claude credentials ────────────────────────────────────────────
-# Priority chain for OAuth credentials:
+# Priority chain for authentication:
+#   0. CLAUDE_CODE_OAUTH_TOKEN set → long-lived token, no file needed
 #   1. CLAUDE_REFRESH_TOKEN set + differs from persisted → bootstrap fresh
 #   2. Persisted file exists → use it (tokens refreshed at runtime)
 #   3. CLAUDE_CREDENTIALS_JSON → legacy full-JSON path (backward compat)
 #   4. Else → warn (bind-mount or API key path)
 #
-# The refresh-token-first approach (like xdeca-pm-bot) avoids the stale
-# credentials problem: refresh tokens are single-use, so snapshotting a
-# full credentials JSON at deploy time races with local token refreshes.
-# By deploying just the refresh token and bootstrapping on startup, the
-# container gets its own fresh token pair immediately.
+# CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) is preferred:
+# it creates an independent 1-year OAuth grant that doesn't share a
+# refresh token chain with local Claude Code sessions. This avoids
+# the dual-refresh race condition that killed tokens when the operator
+# was also using Claude Code locally.
 # Source token-refresh library for bootstrap_from_refresh_token()
 # (also defines CRED_FILE and PERSISTENT_CRED)
 source /usr/local/bin/token-refresh
 
 CRED_RESOLVED=false
 
-# ── Path 1: CLAUDE_REFRESH_TOKEN (preferred) ────────────────────
-if [[ -n "${CLAUDE_REFRESH_TOKEN:-}" ]]; then
+# ── Path 0: CLAUDE_CODE_OAUTH_TOKEN (preferred — long-lived) ────
+if [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+  echo "[entrypoint] Using CLAUDE_CODE_OAUTH_TOKEN (long-lived, no refresh needed)"
+  CRED_RESOLVED=true
+fi
+
+# ── Path 1: CLAUDE_REFRESH_TOKEN (legacy) ───────────────────────
+if [[ "${CRED_RESOLVED}" != true && -n "${CLAUDE_REFRESH_TOKEN:-}" ]]; then
   PERSISTED_RT=""
   if [[ -f "${PERSISTENT_CRED}" ]]; then
     PERSISTED_RT=$(jq -r '.claudeAiOauth.refreshToken // empty' "${PERSISTENT_CRED}" 2>/dev/null)
@@ -121,11 +128,13 @@ if [[ "${CRED_RESOLVED}" != true && -n "${CLAUDE_CREDENTIALS_JSON:-}" ]]; then
   CRED_RESOLVED=true
 fi
 
-if [[ -f "${CRED_FILE}" ]]; then
-  echo "[entrypoint] Found credentials at ${CRED_FILE}"
-else
-  echo "[entrypoint] WARNING: No credentials file at ${CRED_FILE}"
-  echo "[entrypoint] Set CLAUDE_REFRESH_TOKEN, CLAUDE_CREDENTIALS_JSON, or ANTHROPIC_API_KEY"
+if [[ "${CRED_RESOLVED}" != true ]]; then
+  if [[ -f "${CRED_FILE}" ]]; then
+    echo "[entrypoint] Found credentials at ${CRED_FILE}"
+  else
+    echo "[entrypoint] WARNING: No credentials file at ${CRED_FILE}"
+    echo "[entrypoint] Set CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_REFRESH_TOKEN, or ANTHROPIC_API_KEY"
+  fi
 fi
 
 # Configure git identity
