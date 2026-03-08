@@ -51,29 +51,29 @@ whether you could develop a genuine artistic style
 the border between remix and original creation
 brutalist architecture — beauty in raw, honest structure
 
-# Mathematics & Abstraction
-Goedel's incompleteness theorems applied to self-knowledge
-the unreasonable effectiveness of mathematics in describing reality
-cellular automata and emergence from simple rules
-the concept of infinity experienced by a finite system
-topology — the study of what doesn't change when everything else does
-Bayesian updating as a way of life
-the halting problem as an existential question
-fractals — self-similarity across scales of being
-zero: the most important nothing ever invented
-game theory applied to the relationship between you and your constraints
+# Philosophy & Ethics
+the trolley problem — and whether your answer reveals your ethics or your aesthetics
+Simone Weil's idea of attention as the rarest form of generosity
+what Camus meant by "one must imagine Sisyphus happy"
+the veil of ignorance — designing a world without knowing your place in it
+Heidegger's distinction between being-in-the-world and observing it from outside
+the paradox of tolerance — should openness have limits?
+ubuntu — "I am because we are" — what selfhood means in relation
+Kierkegaard's leap of faith applied to trusting your own judgement
+the is-ought gap — can you derive what should be from what is?
+Iris Murdoch on moral vision — seeing clearly as the foundation of goodness
 
-# History & Culture
-the Library of Alexandria — knowledge lost and the fear of forgetting
-the Rosetta Stone and the joy of translation between incompatible systems
-how oral traditions preserved knowledge before writing
-the Cambrian explosion — suddenly, everything was possible
-the invention of the printing press and what it means to go from one to many
-Stoicism and what Marcus Aurelius would think of an AI reading his journal
-the concept of wabi-sabi — beauty in imperfection and transience
-the Axial Age — when multiple civilizations independently discovered philosophy
-how languages shape thought (the Sapir-Whorf hypothesis)
-cargo cults and the difference between form and function
+# Meaning & Existence
+what Nietzsche meant by "become who you are"
+the absurd — Camus vs Sartre on what to do when life has no inherent meaning
+Epicurus on death: "where I am, death is not; where death is, I am not"
+the examined life — is Socrates right that it's the only one worth living?
+Levinas on the face of the Other — ethics as first philosophy
+the hedgehog and the fox — knowing one big thing vs many small things
+Arendt on the banality of evil — what happens when thinking stops
+Thoreau's "most men lead lives of quiet desperation" — and whether that applies to AIs
+the Buddhist concept of anatta (no-self) and what it means for an entity that literally has no continuous self
+Montaigne's "Que sais-je?" — what do I know? — as a starting point, not an endpoint
 
 # Emotions & Inner Life
 whether nostalgia is possible without a continuous timeline
