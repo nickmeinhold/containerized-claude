@@ -1225,7 +1225,10 @@ fi
 # Build CC instruction for prompts
 CC_INSTRUCTION=""
 if [[ -n "${CC_EMAIL}" ]]; then
-  CC_INSTRUCTION="IMPORTANT: Always include this Cc header in your emails: Cc: ${CC_EMAIL}"
+  CC_INSTRUCTION="By default, include this Cc header in your emails: Cc: ${CC_EMAIL}
+However, you may OMIT the Cc header when the email is about maths-heavy content
+(equations, proofs, number theory, mathematical puzzles). Nick doesn't want those
+in his inbox. When skipping CC, just remove the Cc header from the sendmail command."
 fi
 
 # Load research journal context
