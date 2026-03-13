@@ -682,10 +682,61 @@ check_required_vars() {
   fi
 }
 
-# Build the Cc header fragment (with leading newline) or empty string
+# Build the Cc header fragment (with leading newline) or empty string.
+# Uses REPLY_ALL_CC if set (reply-all recipients from original email),
+# otherwise falls back to CC_EMAIL.
 cc_header() {
+  local cc="${REPLY_ALL_CC:-${CC_EMAIL}}"
+  if [[ -n "${cc}" ]]; then
+    printf '\nCc: %s' "${cc}"
+  fi
+}
+
+# Build a reply-all Cc list from the original email's To/Cc recipients.
+# Merges with the configured CC_EMAIL, deduplicates, and removes:
+#   - our own address (MY_EMAIL)
+#   - the sender (REPLY_TO) since they're already in To:
+# Sets REPLY_ALL_CC in the caller's scope.
+build_reply_all_cc() {
+  local msg_json="$1"
+  local reply_to_addr="$2"
+  local -A seen=()
+  local cc_parts=()
+
+  # Normalise MY_EMAIL and REPLY_TO for comparison
+  local my_lower reply_lower
+  my_lower=$(tr '[:upper:]' '[:lower:]' <<< "${MY_EMAIL}")
+  reply_lower=$(tr '[:upper:]' '[:lower:]' <<< "${reply_to_addr}")
+  seen["${my_lower}"]=1
+  seen["${reply_lower}"]=1
+
+  # Collect addresses from the original To and Cc headers
+  local addr addr_lower
+  for addr in $(echo "${msg_json}" | jq -r '(.to // [])[], (.cc // [])[]'); do
+    addr_lower=$(tr '[:upper:]' '[:lower:]' <<< "${addr}")
+    if [[ -z "${seen[${addr_lower}]+_}" ]]; then
+      seen["${addr_lower}"]=1
+      cc_parts+=("${addr}")
+    fi
+  done
+
+  # Add configured CC_EMAIL entries (e.g. Nick)
   if [[ -n "${CC_EMAIL}" ]]; then
-    printf '\nCc: %s' "${CC_EMAIL}"
+    IFS=',' read -ra CC_ARRAY <<< "${CC_EMAIL}"
+    for addr in "${CC_ARRAY[@]}"; do
+      addr=$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<< "${addr}")
+      addr_lower=$(tr '[:upper:]' '[:lower:]' <<< "${addr}")
+      if [[ -n "${addr}" && -z "${seen[${addr_lower}]+_}" ]]; then
+        seen["${addr_lower}"]=1
+        cc_parts+=("${addr}")
+      fi
+    done
+  fi
+
+  # Join with commas
+  REPLY_ALL_CC=""
+  if [[ ${#cc_parts[@]} -gt 0 ]]; then
+    REPLY_ALL_CC=$(IFS=','; echo "${cc_parts[*]}")
   fi
 }
 
@@ -1509,6 +1560,20 @@ LOGENTRY
     # Build turn-based quota context for Claude
     build_budget_context
 
+    # Build reply-all Cc list (merges original To/Cc with configured CC_EMAIL)
+    build_reply_all_cc "${MSG}" "${REPLY_TO}"
+
+    # Build per-email CC instruction (reply-all aware)
+    REPLY_CC_INSTRUCTION=""
+    if [[ -n "${REPLY_ALL_CC}" ]]; then
+      REPLY_CC_INSTRUCTION="The Cc header below includes all thread participants plus Nick (${CC_EMAIL}).
+However, you may OMIT Nick from the Cc when the email is about maths-heavy content
+(equations, proofs, number theory, mathematical puzzles). Nick doesn't want those
+in his inbox. When skipping Nick's CC, keep other thread participants in the Cc."
+    elif [[ -n "${CC_EMAIL}" ]]; then
+      REPLY_CC_INSTRUCTION="${CC_INSTRUCTION}"
+    fi
+
     # Build the prompt for Claude
     REPLY_PROMPT="$(cat <<EOF
 ${PERSONA}
@@ -1541,7 +1606,7 @@ Compose a thoughtful reply. Adapt your tone to who you're talking to:
   things, answer questions, or just chat.
 - If it's someone else, be friendly and curious about who they are.
 
-${CC_INSTRUCTION}
+${REPLY_CC_INSTRUCTION}
 
 To send your reply:
 1. Write your reply text to /tmp/reply.txt
@@ -1613,6 +1678,8 @@ EOF
     else
       log "  WARNING: Claude invocation failed (exit=${CLAUDE_EXIT}, is_error=${IS_ERROR}). Will retry next poll."
     fi
+    # Reset reply-all Cc so it doesn't leak into the next email
+    REPLY_ALL_CC=""
   done < <(echo "${MAIL_JSON}" | jq -c '.messages[]')
 
   # After processing emails, maybe trigger a self-evolution moment

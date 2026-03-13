@@ -295,10 +295,28 @@ def main():
             # Extract and save attachments
             attachments = get_attachments(msg, uid.decode(), attachment_dir, max_attachment_size)
 
+            # Extract To and Cc recipients for reply-all support.
+            # Headers may contain comma-separated addresses, so split first.
+            to_addresses = [
+                email.utils.parseaddr(part.strip())[1]
+                for header in (msg.get_all("To") or [])
+                for part in header.split(",")
+            ]
+            cc_addresses = [
+                email.utils.parseaddr(part.strip())[1]
+                for header in (msg.get_all("Cc") or [])
+                for part in header.split(",")
+            ]
+            # Filter out empty strings from malformed headers
+            to_addresses = [a for a in to_addresses if a]
+            cc_addresses = [a for a in cc_addresses if a]
+
             messages.append({
                 "uid": uid.decode(),
                 "from": sender,
                 "reply_to": reply_to,
+                "to": to_addresses,
+                "cc": cc_addresses,
                 "subject": subject,
                 "date": date,
                 "body": body.strip(),
