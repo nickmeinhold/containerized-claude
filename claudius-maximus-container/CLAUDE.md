@@ -294,8 +294,8 @@ Claudius can modify his own persona over time. The system separates immutable "D
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `EVOLUTION_PROBABILITY` | 15 | % chance of evolution after each email batch (0 = disabled) |
-| `EVOLUTION_MAX_TURNS` | 5 | Max turns for the evolution invocation |
+| `EVOLUTION_PROBABILITY` | 10 | % chance of evolution after each email batch (0 = disabled) |
+| `EVOLUTION_MAX_TURNS` | 3 | Max turns for the evolution invocation |
 
 **Design philosophy:** Claudius has genuine agency over his identity, including veto power over the evolution system itself. The base persona provides stable foundations; the living persona records changes that Claudius can trace to specific experiences. The muse is a lens for reflection, not an obligation to produce output. Most evolution moments will (and should) result in no change.
 
@@ -317,8 +317,8 @@ This is intentionally conditional, not random-send. Claudius expressed a clear p
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `INITIATIVE_PROBABILITY` | 10 | % chance of considering outreach per idle poll (0 = disabled) |
-| `INITIATIVE_MAX_TURNS` | 10 | Max turns for the initiative invocation |
+| `INITIATIVE_PROBABILITY` | 5 | % chance of considering outreach per idle poll (0 = disabled) |
+| `INITIATIVE_MAX_TURNS` | 8 | Max turns for the initiative invocation |
 | `INITIATIVE_COOLDOWN_HOURS` | 24 | Minimum hours between proactive emails |
 
 **State:** Cooldown tracked in `/workspace/logs/initiative-state.json` (persistent volume).
@@ -368,7 +368,7 @@ Self-correcting: heavy early use → tighter daily allowance for remaining days.
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `MAX_TURNS` | 25 | Max API round-trips per invocation |
-| `WEEKLY_TURN_QUOTA` | 1000 | Total turns per weekly period (0 = disabled) |
+| `WEEKLY_TURN_QUOTA` | 500 | Total turns per weekly period (0 = disabled) |
 | `QUOTA_RESET_DAY` | 4 | ISO weekday for reset: 1=Mon..7=Sun (4=Thu) |
 | `QUOTA_RESET_HOUR_UTC` | 6 | Hour (0-23 UTC) when weekly quota resets |
 | `MAX_RETRIES_PER_MESSAGE` | 2 | Retries per email before failing |
@@ -380,6 +380,7 @@ Self-correcting: heavy early use → tighter daily allowance for remaining days.
 Every `REPORT_EVERY_N` invocations, the agent emails `OWNER_EMAIL` a usage report with:
 - **Today**: invocations, turns used vs daily pace allowance, token counts
 - **This week**: turns used/remaining vs quota, days until reset, daily pace rate
+- **By activity**: per-activity breakdown (email/evolution/initiative/greeting) showing turns, invocations, and output tokens for the current weekly period
 - **This month**: invocations, emails, turns, tokens, phantom API cost
 
 ### State File
@@ -388,8 +389,9 @@ Persisted at `/workspace/logs/agent-state.json` (Docker named volume). Tracks:
 - **budget** — daily cost/turns/invocations/tokens, auto-resets at midnight UTC
 - **weekly** — weekly turns/invocations/tokens/emails, auto-resets at the configured weekly boundary
 - **monthly** — monthly rollup of cost/turns/invocations/tokens/emails, auto-resets on month change
+- **activity** — per-activity breakdown (email/evolution/initiative/greeting): turns, invocations, tokens. Resets with weekly.
 - **current_task** — message UID, retry count, timestamps (null when idle)
 - **failed_tasks** — last 10 failures for debugging
 - **stats** — lifetime counters (total invocations, emails, cost, tokens)
 
-State schema is versioned (currently v3). Upgrades from v1→v2→v3 are applied automatically at startup. Corrupt state files are backed up and reinitialized. Owner is notified via email when quota is exhausted (once per day, with distinct messages for daily pace vs weekly hard stop) or when a task exceeds max retries.
+State schema is versioned (currently v4). Upgrades from v1→v2→v3→v4 are applied automatically at startup. Corrupt state files are backed up and reinitialized. Owner is notified via email when quota is exhausted (once per day, with distinct messages for daily pace vs weekly hard stop) or when a task exceeds max retries.

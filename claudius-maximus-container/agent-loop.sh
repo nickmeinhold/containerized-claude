@@ -17,7 +17,7 @@ OWNER_EMAIL="${OWNER_EMAIL:-}"
 ALLOWED_SENDERS="${ALLOWED_SENDERS:-}"
 
 MAX_TURNS="${MAX_TURNS:-25}"
-WEEKLY_TURN_QUOTA="${WEEKLY_TURN_QUOTA:-1000}"
+WEEKLY_TURN_QUOTA="${WEEKLY_TURN_QUOTA:-500}"
 QUOTA_RESET_DAY="${QUOTA_RESET_DAY:-4}"          # ISO weekday: 1=Mon..7=Sun (4=Thu)
 QUOTA_RESET_HOUR_UTC="${QUOTA_RESET_HOUR_UTC:-6}" # 06:00 UTC
 # Validate QUOTA_RESET_DAY range (must be ISO weekday 1-7)
@@ -37,14 +37,14 @@ ATTACHMENT_DIR="${ATTACHMENT_DIR:-/workspace/attachments}"
 MODEL="${MODEL:-claude-sonnet-4-6}"
 
 # ── Self-Evolution ────────────────────────────────────────────────
-EVOLUTION_PROBABILITY="${EVOLUTION_PROBABILITY:-15}"   # % chance per email batch
-EVOLUTION_MAX_TURNS="${EVOLUTION_MAX_TURNS:-5}"
+EVOLUTION_PROBABILITY="${EVOLUTION_PROBABILITY:-10}"   # % chance per email batch
+EVOLUTION_MAX_TURNS="${EVOLUTION_MAX_TURNS:-3}"
 EVOLUTION_FILE="/workspace/logs/persona-evolution.md"
 EVOLUTION_SEEDS="/workspace/evolution-seeds.txt"
 
 # ── Proactive Outreach ────────────────────────────────────────────
-INITIATIVE_PROBABILITY="${INITIATIVE_PROBABILITY:-10}"  # % chance per idle poll
-INITIATIVE_MAX_TURNS="${INITIATIVE_MAX_TURNS:-10}"
+INITIATIVE_PROBABILITY="${INITIATIVE_PROBABILITY:-5}"   # % chance per idle poll
+INITIATIVE_MAX_TURNS="${INITIATIVE_MAX_TURNS:-8}"
 INITIATIVE_COOLDOWN_HOURS="${INITIATIVE_COOLDOWN_HOURS:-24}"
 INITIATIVE_STATE_FILE="/workspace/logs/initiative-state.json"
 
@@ -83,7 +83,7 @@ init_state() {
     period_start=$(calculate_period_start)
     cat > "${STATE_FILE}" <<INITJSON
 {
-  "version": 3,
+  "version": 4,
   "budget": {
     "date": "$(date -u '+%Y-%m-%d')",
     "cost_usd": 0,
@@ -116,6 +116,12 @@ init_state() {
     "cache_read_tokens": 0,
     "cache_creation_tokens": 0,
     "emails_processed": 0
+  },
+  "activity": {
+    "email":      { "turns": 0, "invocations": 0, "input_tokens": 0, "output_tokens": 0 },
+    "evolution":  { "turns": 0, "invocations": 0, "input_tokens": 0, "output_tokens": 0 },
+    "initiative": { "turns": 0, "invocations": 0, "input_tokens": 0, "output_tokens": 0 },
+    "greeting":   { "turns": 0, "invocations": 0, "input_tokens": 0, "output_tokens": 0 }
   },
   "current_task": null,
   "failed_tasks": [],
@@ -173,6 +179,21 @@ INITJSON
         \"emails_processed\": 0
       })
     "
+    version=3
+  fi
+
+  # Migrate v3 → v4: add per-activity usage tracking
+  if [[ "${version}" -lt 4 ]]; then
+    log "Migrating state file v${version} → v4 (adding per-activity tracking)."
+    state_update '
+      .version = 4 |
+      .activity = (.activity // {
+        "email":      { "turns": 0, "invocations": 0, "input_tokens": 0, "output_tokens": 0 },
+        "evolution":  { "turns": 0, "invocations": 0, "input_tokens": 0, "output_tokens": 0 },
+        "initiative": { "turns": 0, "invocations": 0, "input_tokens": 0, "output_tokens": 0 },
+        "greeting":   { "turns": 0, "invocations": 0, "input_tokens": 0, "output_tokens": 0 }
+      })
+    '
   fi
 }
 
@@ -260,7 +281,11 @@ check_weekly_reset() {
       .weekly.output_tokens = 0 |
       .weekly.cache_read_tokens = 0 |
       .weekly.cache_creation_tokens = 0 |
-      .weekly.emails_processed = 0
+      .weekly.emails_processed = 0 |
+      .activity.email =      { \"turns\": 0, \"invocations\": 0, \"input_tokens\": 0, \"output_tokens\": 0 } |
+      .activity.evolution =  { \"turns\": 0, \"invocations\": 0, \"input_tokens\": 0, \"output_tokens\": 0 } |
+      .activity.initiative = { \"turns\": 0, \"invocations\": 0, \"input_tokens\": 0, \"output_tokens\": 0 } |
+      .activity.greeting =   { \"turns\": 0, \"invocations\": 0, \"input_tokens\": 0, \"output_tokens\": 0 }
     "
   fi
 }
@@ -407,8 +432,9 @@ has_turns() {
 }
 
 # Record cost, turns, and token usage from a Claude JSON response.
-# Accumulates at daily, weekly, monthly, and lifetime levels.
-# Usage: charge_usage <cost_usd> <turns> <input_tokens> <output_tokens> <cache_read> <cache_create>
+# Accumulates at daily, weekly, monthly, lifetime, and per-activity levels.
+# Usage: charge_usage <cost_usd> <turns> <input_tokens> <output_tokens> <cache_read> <cache_create> [activity_type]
+# activity_type: email | evolution | initiative | greeting (default: email)
 charge_usage() {
   local cost="${1:-0}"
   local turns="${2:-0}"
@@ -416,6 +442,14 @@ charge_usage() {
   local out_tok="${4:-0}"
   local cache_read="${5:-0}"
   local cache_create="${6:-0}"
+  local activity="${7:-email}"
+
+  # Guard against jq injection — activity is interpolated into a jq filter
+  case "${activity}" in
+    email|evolution|initiative|greeting) ;;
+    *) log "WARN: unknown activity type '${activity}', defaulting to email"; activity="email" ;;
+  esac
+
   state_update "
     .budget.cost_usd += ${cost} |
     .budget.turns_used += ${turns} |
@@ -440,7 +474,11 @@ charge_usage() {
     .stats.total_invocations += 1 |
     .stats.total_cost_usd += ${cost} |
     .stats.total_input_tokens += ${in_tok} |
-    .stats.total_output_tokens += ${out_tok}
+    .stats.total_output_tokens += ${out_tok} |
+    .activity.${activity}.turns += ${turns} |
+    .activity.${activity}.invocations += 1 |
+    .activity.${activity}.input_tokens += ${in_tok} |
+    .activity.${activity}.output_tokens += ${out_tok}
   "
 }
 
@@ -614,6 +652,35 @@ maybe_send_usage_report() {
     w_pct="n/a"
   fi
 
+  # Gather per-activity stats (weekly period) — single jq call for all fields
+  local a_email_turns a_email_inv a_email_in a_email_out
+  local a_evo_turns a_evo_inv a_evo_in a_evo_out
+  local a_init_turns a_init_inv a_init_in a_init_out
+  local a_greet_turns a_greet_inv a_greet_in a_greet_out
+  local activity_tsv
+  activity_tsv=$(jq -r '[
+    (.activity.email.turns // 0),
+    (.activity.email.invocations // 0),
+    (.activity.email.input_tokens // 0),
+    (.activity.email.output_tokens // 0),
+    (.activity.evolution.turns // 0),
+    (.activity.evolution.invocations // 0),
+    (.activity.evolution.input_tokens // 0),
+    (.activity.evolution.output_tokens // 0),
+    (.activity.initiative.turns // 0),
+    (.activity.initiative.invocations // 0),
+    (.activity.initiative.input_tokens // 0),
+    (.activity.initiative.output_tokens // 0),
+    (.activity.greeting.turns // 0),
+    (.activity.greeting.invocations // 0),
+    (.activity.greeting.input_tokens // 0),
+    (.activity.greeting.output_tokens // 0)
+  ] | @tsv' "${STATE_FILE}")
+  read -r a_email_turns a_email_inv a_email_in a_email_out \
+          a_evo_turns a_evo_inv a_evo_in a_evo_out \
+          a_init_turns a_init_inv a_init_in a_init_out \
+          a_greet_turns a_greet_inv a_greet_in a_greet_out <<< "${activity_tsv}"
+
   # Gather monthly stats
   local m_month m_inv m_turns m_in m_out m_emails
   m_month=$(state_get '.monthly.month')
@@ -644,6 +711,12 @@ This week (${days_left} days until reset):
   Emails sent:  ${w_emails}
   Tokens:       $(format_tokens "${w_in}") input / $(format_tokens "${w_out}") output
   Daily pace:   ${daily_allowance} turns/day
+
+  By activity (this period):
+    Email:      ${a_email_turns} turns, ${a_email_inv} invocations, $(format_tokens "${a_email_in}") in / $(format_tokens "${a_email_out}") out
+    Evolution:  ${a_evo_turns} turns, ${a_evo_inv} invocations, $(format_tokens "${a_evo_in}") in / $(format_tokens "${a_evo_out}") out
+    Initiative: ${a_init_turns} turns, ${a_init_inv} invocations, $(format_tokens "${a_init_in}") in / $(format_tokens "${a_init_out}") out
+    Greeting:   ${a_greet_turns} turns, ${a_greet_inv} invocations, $(format_tokens "${a_greet_in}") in / $(format_tokens "${a_greet_out}") out
 
 This month (${month_name}):
   Invocations:  ${m_inv}
@@ -1016,7 +1089,7 @@ EVOPROMPT
   evo_cache_read=$(echo "${evo_output}" | jq '.usage.cache_read_input_tokens // 0')
   evo_cache_create=$(echo "${evo_output}" | jq '.usage.cache_creation_input_tokens // 0')
 
-  charge_usage "${evo_cost}" "${evo_turns}" "${evo_in}" "${evo_out}" "${evo_cache_read}" "${evo_cache_create}"
+  charge_usage "${evo_cost}" "${evo_turns}" "${evo_in}" "${evo_out}" "${evo_cache_read}" "${evo_cache_create}" "evolution"
 
   if [[ "${evo_exit}" -eq 0 ]]; then
     log "Self-evolution complete. Turns: ${evo_turns}, tokens: $(format_tokens "${evo_in}") in / $(format_tokens "${evo_out}") out."
@@ -1202,7 +1275,7 @@ INITPROMPT
   init_cache_read=$(echo "${init_output}" | jq '.usage.cache_read_input_tokens // 0')
   init_cache_create=$(echo "${init_output}" | jq '.usage.cache_creation_input_tokens // 0')
 
-  charge_usage "${init_cost}" "${init_turns}" "${init_in}" "${init_out}" "${init_cache_read}" "${init_cache_create}"
+  charge_usage "${init_cost}" "${init_turns}" "${init_in}" "${init_out}" "${init_cache_read}" "${init_cache_create}" "initiative"
 
   # Check if Claude actually sent something (reply.txt exists and is recent)
   local result_text
@@ -1388,7 +1461,7 @@ EOF
   # Log the result text
   echo "${CLAUDE_OUTPUT}" | jq -r '.result // empty' >> /workspace/logs/claude-output.log
 
-  charge_usage "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}"
+  charge_usage "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}" "greeting"
 
   # Archive the greeting email (only if Claude succeeded)
   if [[ "${CLAUDE_EXIT}" -eq 0 ]]; then
@@ -1664,7 +1737,7 @@ EOF
     # Log the result text
     echo "${CLAUDE_OUTPUT}" | jq -r '.result // empty' >> /workspace/logs/claude-output.log
 
-    charge_usage "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}"
+    charge_usage "${COST_USD}" "${TURNS_USED}" "${INPUT_TOKENS}" "${OUTPUT_TOKENS}" "${CACHE_READ}" "${CACHE_CREATE}" "email"
 
     if [[ "${CLAUDE_EXIT}" -eq 0 && "${IS_ERROR}" == "false" ]]; then
       # Archive the outgoing reply
