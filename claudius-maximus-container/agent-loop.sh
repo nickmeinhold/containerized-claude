@@ -443,6 +443,13 @@ charge_usage() {
   local cache_read="${5:-0}"
   local cache_create="${6:-0}"
   local activity="${7:-email}"
+
+  # Guard against jq injection — activity is interpolated into a jq filter
+  case "${activity}" in
+    email|evolution|initiative|greeting) ;;
+    *) log "WARN: unknown activity type '${activity}', defaulting to email"; activity="email" ;;
+  esac
+
   state_update "
     .budget.cost_usd += ${cost} |
     .budget.turns_used += ${turns} |
@@ -645,23 +652,34 @@ maybe_send_usage_report() {
     w_pct="n/a"
   fi
 
-  # Gather per-activity stats (weekly period)
-  local a_email_turns a_email_inv a_email_out
-  local a_evo_turns a_evo_inv a_evo_out
-  local a_init_turns a_init_inv a_init_out
-  local a_greet_turns a_greet_inv a_greet_out
-  a_email_turns=$(state_get '.activity.email.turns // 0')
-  a_email_inv=$(state_get '.activity.email.invocations // 0')
-  a_email_out=$(state_get '.activity.email.output_tokens // 0')
-  a_evo_turns=$(state_get '.activity.evolution.turns // 0')
-  a_evo_inv=$(state_get '.activity.evolution.invocations // 0')
-  a_evo_out=$(state_get '.activity.evolution.output_tokens // 0')
-  a_init_turns=$(state_get '.activity.initiative.turns // 0')
-  a_init_inv=$(state_get '.activity.initiative.invocations // 0')
-  a_init_out=$(state_get '.activity.initiative.output_tokens // 0')
-  a_greet_turns=$(state_get '.activity.greeting.turns // 0')
-  a_greet_inv=$(state_get '.activity.greeting.invocations // 0')
-  a_greet_out=$(state_get '.activity.greeting.output_tokens // 0')
+  # Gather per-activity stats (weekly period) — single jq call for all fields
+  local a_email_turns a_email_inv a_email_in a_email_out
+  local a_evo_turns a_evo_inv a_evo_in a_evo_out
+  local a_init_turns a_init_inv a_init_in a_init_out
+  local a_greet_turns a_greet_inv a_greet_in a_greet_out
+  local activity_tsv
+  activity_tsv=$(jq -r '[
+    (.activity.email.turns // 0),
+    (.activity.email.invocations // 0),
+    (.activity.email.input_tokens // 0),
+    (.activity.email.output_tokens // 0),
+    (.activity.evolution.turns // 0),
+    (.activity.evolution.invocations // 0),
+    (.activity.evolution.input_tokens // 0),
+    (.activity.evolution.output_tokens // 0),
+    (.activity.initiative.turns // 0),
+    (.activity.initiative.invocations // 0),
+    (.activity.initiative.input_tokens // 0),
+    (.activity.initiative.output_tokens // 0),
+    (.activity.greeting.turns // 0),
+    (.activity.greeting.invocations // 0),
+    (.activity.greeting.input_tokens // 0),
+    (.activity.greeting.output_tokens // 0)
+  ] | @tsv' "${STATE_FILE}")
+  read -r a_email_turns a_email_inv a_email_in a_email_out \
+          a_evo_turns a_evo_inv a_evo_in a_evo_out \
+          a_init_turns a_init_inv a_init_in a_init_out \
+          a_greet_turns a_greet_inv a_greet_in a_greet_out <<< "${activity_tsv}"
 
   # Gather monthly stats
   local m_month m_inv m_turns m_in m_out m_emails
@@ -695,10 +713,10 @@ This week (${days_left} days until reset):
   Daily pace:   ${daily_allowance} turns/day
 
   By activity (this period):
-    Email:      ${a_email_turns} turns, ${a_email_inv} invocations, $(format_tokens "${a_email_out}") output
-    Evolution:  ${a_evo_turns} turns, ${a_evo_inv} invocations, $(format_tokens "${a_evo_out}") output
-    Initiative: ${a_init_turns} turns, ${a_init_inv} invocations, $(format_tokens "${a_init_out}") output
-    Greeting:   ${a_greet_turns} turns, ${a_greet_inv} invocations, $(format_tokens "${a_greet_out}") output
+    Email:      ${a_email_turns} turns, ${a_email_inv} invocations, $(format_tokens "${a_email_in}") in / $(format_tokens "${a_email_out}") out
+    Evolution:  ${a_evo_turns} turns, ${a_evo_inv} invocations, $(format_tokens "${a_evo_in}") in / $(format_tokens "${a_evo_out}") out
+    Initiative: ${a_init_turns} turns, ${a_init_inv} invocations, $(format_tokens "${a_init_in}") in / $(format_tokens "${a_init_out}") out
+    Greeting:   ${a_greet_turns} turns, ${a_greet_inv} invocations, $(format_tokens "${a_greet_in}") in / $(format_tokens "${a_greet_out}") out
 
 This month (${month_name}):
   Invocations:  ${m_inv}
