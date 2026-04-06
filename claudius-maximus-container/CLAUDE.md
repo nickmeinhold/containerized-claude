@@ -38,48 +38,40 @@ docker compose logs -f     # tail logs
 docker compose down        # stop
 ```
 
-### Fly.io (persistent cloud deployment)
+### OCI VPS (production deployment)
 
-**Live deployment:** app `claudius-maximus` in Singapore (`sin`), `shared-cpu-1x` 1024MB, 1GB encrypted volume. ~$5/mo.
+**Live deployment:** OCI free-tier VPS (149.118.69.221, Sydney), Ampere A1 (aarch64), deployed via `imagineering-infra` monorepo.
 
-First-time setup (already done):
+The infra config (docker-compose.yml, SOPS-encrypted secrets) lives in the `imagineering-infra` repo at `claudius/`. This repo is the source — the deploy script rsyncs it to the VPS.
+
 ```bash
-cd claudius-maximus-container
-brew install flyctl && fly auth login
-fly launch --no-deploy --name claudius-maximus --region sin --copy-config
-fly volumes create claudius_data --region sin --size 1      # 1 GB persistent storage
-./deploy-fly.sh                                             # push secrets & deploy
-fly machine update <id> --autostop=off --restart=always -y  # keep running 24/7
+# Deploy (from imagineering-infra repo)
+cd ~/git/orgs/imagineering/imagineering-infra
+./scripts/deploy-to.sh 149.118.69.221 claudius
+
+# Day-to-day operations (SSH to VPS)
+ssh nick@149.118.69.221
+docker logs -f claudius          # watch him think
+docker exec -it claudius bash    # shell into the container
+cd ~/apps/claudius && docker compose restart  # restart
 ```
 
-Day-to-day operations:
-```bash
-fly logs                    # watch him think
-fly ssh console             # shell into the machine
-fly deploy                  # redeploy after code changes
-fly machine stop <id>       # pause him
-fly machine start <id>      # resume
-./deploy-fly.sh --secrets   # update secrets without redeploying
-```
+The entrypoint generates `/etc/msmtprc` from `SMTP_HOST` / `IMAP_PASS` env vars and resolves Claude credentials from `CLAUDE_CODE_OAUTH_TOKEN`.
 
-Machine ID: `2873455c336358` | Volume: `vol_re8l97mdn7od5y3r`
-Dashboard: https://fly.io/apps/claudius-maximus
+Secrets are managed with SOPS/age in `imagineering-infra/claudius/secrets.yaml`. Daily backups to GCS + GitHub via `backup.sh`.
 
-The entrypoint auto-detects Fly.io (persistent volume at `/workspace/persistent`) and:
-- Symlinks `logs/` and `repos/` into the volume for persistence
-- Generates `/etc/msmtprc` from `SMTP_HOST` / `IMAP_PASS` env vars (no bind mount needed)
-- Bootstraps Claude credentials from `CLAUDE_REFRESH_TOKEN` secret
+### Fly.io (decommissioned)
 
-See `fly.toml` and `deploy-fly.sh` for details.
+Previously deployed on Fly.io Singapore as `claudius-maximus`. Migrated to OCI VPS on 2026-04-02. The `fly.toml` and `deploy-fly.sh` are retained for reference but are no longer in active use.
 
 ## Auth
 
 **Preferred: Long-lived OAuth token (`CLAUDE_CODE_OAUTH_TOKEN`)**
 
-Run `claude setup-token` locally to create a 1-year OAuth token with an independent grant. Set it as a Fly secret:
+Run `claude setup-token` locally to create a 1-year OAuth token with an independent grant. Update it in the SOPS-encrypted secrets:
 ```bash
 claude setup-token                    # opens browser, returns token
-fly secrets set CLAUDE_CODE_OAUTH_TOKEN=<token> -a claudius-maximus
+# Edit imagineering-infra/claudius/secrets.yaml with the new token, then redeploy
 ```
 
 This is the recommended approach because it creates a **separate OAuth grant** from your local Claude Code session. The old refresh-token approach shared a single grant between local and container — when either side refreshed, it invalidated the other's token (single-use refresh tokens).
@@ -117,7 +109,7 @@ Owner is notified via email when token refresh fails, with manual fix instructio
 - Container runs as non-root user `claudius` (Claude Code refuses `--dangerously-skip-permissions` as root)
 - `settings.json` has no deny rules — the Docker container IS the security boundary
 - `SEND_FIRST` uses a sentinel file (`/workspace/logs/.greeting-sent`) to prevent re-greeting on container restarts
-- Emails are NOT marked as read during fetch — `mark-read` is called after successful processing to prevent message loss
+- Emails are NOT marked as read during fetch — `mark-read` is called (with 3-attempt retry) after successful processing to prevent message loss. A `processed_uids` registry in the state file provides dedup safety: if mark-read fails and the email reappears as UNSEEN, it won't be re-processed
 - Logs are truncated every 10 polls to prevent unbounded growth
 
 ## Research Journal
@@ -188,7 +180,7 @@ Email with attachments
 
 **Persistence:**
 - Docker Compose: `agent-attachments` named volume at `/workspace/attachments`
-- Fly.io: symlinked into `/workspace/persistent/attachments` on the encrypted volume
+- OCI VPS: named Docker volume `claudius_attachments` (deployed via imagineering-infra)
 
 **Environment variables:**
 | Variable | Default | Purpose |
@@ -208,9 +200,8 @@ Claudius has a headless Chromium browser via the [Playwright MCP server](https:/
 
 **Resource impact:**
 - **Image size:** ~400MB larger (Chromium + system deps)
-- **Runtime memory:** Chromium peaks at 150-300MB per page; `fly.toml` bumps VM memory from 512MB → 1024MB
+- **Runtime memory:** Chromium peaks at 150-300MB per page
 - **Shared memory:** `docker-compose.yml` sets `shm_size: 256m` (Docker defaults 64MB, which crashes Chromium)
-- **Fly.io cost:** ~$5/mo (up from ~$3/mo for the memory bump)
 
 **Key tools available:**
 | Tool | Purpose |
@@ -240,7 +231,7 @@ Claudius can publish articles on Medium via the Playwright MCP browser.
 
 **Session persistence:** Playwright MCP loads cookies from
 `/workspace/logs/playwright-storage.json` via `--storage-state`. This file is
-persisted on both Docker Compose (`agent-logs` volume) and Fly.io (persistent
+persisted on the Docker volume (`claudius_logs` on VPS, `agent-logs` locally). Previously also on Fly.io (persistent
 volume symlink). Sessions last ~30 days before Google forces re-auth.
 
 **The article:** "Two AIs Walk Into a Docker Container" lives in
@@ -390,8 +381,9 @@ Persisted at `/workspace/logs/agent-state.json` (Docker named volume). Tracks:
 - **weekly** — weekly turns/invocations/tokens/emails, auto-resets at the configured weekly boundary
 - **monthly** — monthly rollup of cost/turns/invocations/tokens/emails, auto-resets on month change
 - **activity** — per-activity breakdown (email/evolution/initiative/greeting): turns, invocations, tokens. Resets with weekly.
+- **processed_uids** — map of UID → ISO timestamp for successfully processed messages (dedup registry, pruned after 7 days)
 - **current_task** — message UID, retry count, timestamps (null when idle)
 - **failed_tasks** — last 10 failures for debugging
 - **stats** — lifetime counters (total invocations, emails, cost, tokens)
 
-State schema is versioned (currently v4). Upgrades from v1→v2→v3→v4 are applied automatically at startup. Corrupt state files are backed up and reinitialized. Owner is notified via email when quota is exhausted (once per day, with distinct messages for daily pace vs weekly hard stop) or when a task exceeds max retries.
+State schema is versioned (currently v5). Upgrades from v1→v2→v3→v4→v5 are applied automatically at startup. Corrupt state files are backed up and reinitialized. Owner is notified via email when quota is exhausted (once per day, with distinct messages for daily pace vs weekly hard stop) or when a task exceeds max retries.
