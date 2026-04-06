@@ -83,7 +83,7 @@ init_state() {
     period_start=$(calculate_period_start)
     cat > "${STATE_FILE}" <<INITJSON
 {
-  "version": 4,
+  "version": 5,
   "budget": {
     "date": "$(date -u '+%Y-%m-%d')",
     "cost_usd": 0,
@@ -123,6 +123,7 @@ init_state() {
     "initiative": { "turns": 0, "invocations": 0, "input_tokens": 0, "output_tokens": 0 },
     "greeting":   { "turns": 0, "invocations": 0, "input_tokens": 0, "output_tokens": 0 }
   },
+  "processed_uids": {},
   "current_task": null,
   "failed_tasks": [],
   "stats": {
@@ -194,6 +195,14 @@ INITJSON
         "greeting":   { "turns": 0, "invocations": 0, "input_tokens": 0, "output_tokens": 0 }
       })
     '
+    version=4
+  fi
+
+  # Migrate v4 → v5: add processed_uids deduplication registry
+  if [[ "${version}" -lt 5 ]]; then
+    log "Migrating state file v${version} → v5 (adding processed UIDs registry)."
+    state_update '.version = 5 | .processed_uids = (.processed_uids // {})'
+    version=5
   fi
 }
 
@@ -571,6 +580,50 @@ get_task_retries() {
   else
     echo "0"
   fi
+}
+
+# Check if a UID has already been successfully processed.
+# Usage: if is_uid_processed "4521"; then skip; fi
+is_uid_processed() {
+  local uid="$1"
+  local ts
+  ts=$(state_get ".processed_uids.\"${uid}\" // empty")
+  [[ -n "${ts}" ]]
+}
+
+# Record a UID as successfully processed.
+# Usage: record_processed_uid "4521"
+record_processed_uid() {
+  local uid="$1"
+  local now
+  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  state_update ".processed_uids.\"${uid}\" = \"${now}\""
+}
+
+# Prune processed UIDs older than 7 days to prevent unbounded growth.
+prune_processed_uids() {
+  local cutoff
+  cutoff=$(date -u -d '7 days ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+    || date -u -v-7d '+%Y-%m-%dT%H:%M:%SZ')  # GNU vs BSD date
+  state_update "(.processed_uids // {}) |= with_entries(select(.value > \"${cutoff}\"))"
+}
+
+# Mark a message as read with retry logic (3 attempts, exponential backoff).
+# Usage: mark_read_with_retry "4521"
+mark_read_with_retry() {
+  local uid="$1"
+  local attempt
+  for attempt in 1 2 3; do
+    if mark-read "${uid}" 2>>/workspace/logs/fetch-mail-err.log; then
+      return 0
+    fi
+    if [[ "${attempt}" -lt 3 ]]; then
+      log "  WARNING: mark-read attempt ${attempt} failed for UID ${uid}, retrying in $((2 ** attempt))s..."
+      sleep $((2 ** attempt))
+    fi
+  done
+  log "  ERROR: mark-read failed after 3 attempts for UID ${uid}"
+  return 1
 }
 
 # Send an email notification to the owner.
@@ -1505,6 +1558,7 @@ while true; do
   check_daily_reset
   check_weekly_reset
   check_monthly_reset
+  prune_processed_uids
 
   if ! is_active_hours; then
     log "Outside active hours (${ACTIVE_HOURS_UTC}). Sleeping..."
@@ -1578,6 +1632,13 @@ while true; do
     # Skip emails from ourselves
     if [[ "${REPLY_TO}" == "${MY_EMAIL}" ]]; then
       log "  Skipping UID ${MSG_UID} — email is from myself."
+      continue
+    fi
+
+    # Skip already-processed messages (dedup: prevents re-reply when mark-read fails)
+    if is_uid_processed "${MSG_UID}"; then
+      log "  Skipping UID ${MSG_UID} — already processed. Re-attempting mark-read."
+      mark_read_with_retry "${MSG_UID}" || true
       continue
     fi
 
@@ -1743,9 +1804,10 @@ EOF
       # Archive the outgoing reply
       archive_outgoing "${REPLY_TO}" "Re: ${SUBJECT}" "${MSG_UID}"
       complete_current_task
-      # Mark the message as read now that it's been processed
-      mark-read "${MSG_UID}" 2>>/workspace/logs/fetch-mail-err.log \
-        || log "  WARNING: failed to mark UID ${MSG_UID} as read"
+      # Record UID as processed BEFORE mark-read — this is the dedup safety net
+      record_processed_uid "${MSG_UID}"
+      # Mark the message as read (with retry) so it doesn't appear in next fetch
+      mark_read_with_retry "${MSG_UID}" || true
       log "Reply processed. Turns: ${TURNS_USED}, tokens: $(format_tokens "${INPUT_TOKENS}") in / $(format_tokens "${OUTPUT_TOKENS}") out."
       maybe_send_usage_report
     else

@@ -32,5 +32,9 @@ When using docker-compose with a bind-mounted `msmtprc`, the Gmail App Password 
 - `.env` (`IMAP_PASS`) — used by `fetch-mail.py` for IMAP
 - `msmtprc` (`password`) — used by msmtp for SMTP
 
-**Workaround:** Set `SMTP_HOST=smtp.gmail.com` in `.env` and the entrypoint will generate `msmtprc` from env vars automatically, using `IMAP_PASS` as the single source of truth. This is the default path on Fly.io.
+**Workaround:** Set `SMTP_HOST=smtp.gmail.com` in `.env` and the entrypoint will generate `msmtprc` from env vars automatically, using `IMAP_PASS` as the single source of truth. This is the default path on the OCI VPS (and was on Fly.io).
+
+## Deployment
+
+Production deployment is on the OCI VPS (149.118.69.221) via the `imagineering-infra` monorepo. Infra config (docker-compose.yml, SOPS secrets) lives in `imagineering-infra/claudius/`; this repo is the source code that gets rsynced to the VPS during deploy. Fly.io deployment was decommissioned 2026-04-02.
 
