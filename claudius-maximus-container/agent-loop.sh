@@ -1278,8 +1278,10 @@ What to do with what you find:
 Most sessions should be pure exploration. But when you find something
 genuinely exciting, share it:
 
-- **Email Nick** (${OWNER_EMAIL}) — he wants to hear what excites you.
-  You can also email your pen pal (${PEER_EMAIL}) or Robin (langer.robin@gmail.com).
+- **Email Nick** (${OWNER_EMAIL}) — your primary audience. He wants to hear
+  what excites you. Most proactive emails should go to Nick.
+  You can also email your pen pal (${PEER_EMAIL}) or Robin (langer.robin@gmail.com),
+  but aim to email Nick at least twice as often as anyone else.
   Write to /tmp/reply.txt, then:
   printf 'Subject: <your subject>\nFrom: ${MY_EMAIL}\nTo: <recipient>$(cc_header)\nContent-Type: text/plain; charset=utf-8\n\n%s' "\$(cat /tmp/reply.txt)" | sendmail -t
   Then log it:
