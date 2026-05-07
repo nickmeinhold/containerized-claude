@@ -665,6 +665,85 @@ notify_quota_exhausted() {
   state_update '.budget.exhausted_notified = true'
 }
 
+# ── Rate-Limit Backoff ───────────────────────────────────────────
+# Detects Anthropic's "You've hit your limit" 429 response and pauses
+# Claude invocations until the named reset time. This is distinct from
+# the WEEKLY_TURN_QUOTA self-pacing — it handles the rolling 5-hour
+# Anthropic-side rate limit that no internal counter can predict.
+
+RATE_LIMIT_FILE="/workspace/logs/.rate-limit-until"
+
+# True if Claude returned a 429 / usage-limit response.
+# Usage: is_rate_limit_error <claude_output_json>
+is_rate_limit_error() {
+  local output="$1"
+  local status
+  status=$(echo "${output}" | jq -r '.api_error_status // empty' 2>/dev/null)
+  [[ "${status}" == "429" ]]
+}
+
+# Parse reset time from result text like "You've hit your limit · resets 11pm (UTC)".
+# Echoes an epoch (UTC). Falls back to now+1h if parsing fails.
+# Usage: epoch=$(parse_rate_limit_reset_epoch "${claude_output}")
+parse_rate_limit_reset_epoch() {
+  local output="$1"
+  local result_text time_str now today_epoch
+  result_text=$(echo "${output}" | jq -r '.result // empty' 2>/dev/null)
+  time_str=$(echo "${result_text}" | grep -oE 'resets [0-9]{1,2}(:[0-9]{2})?(am|pm)' | sed 's/^resets //' | head -n1)
+  now=$(date -u +%s)
+  if [[ -z "${time_str}" ]]; then
+    echo $((now + 3600))
+    return
+  fi
+  today_epoch=$(TZ=UTC date -d "today ${time_str}" +%s 2>/dev/null || echo 0)
+  if [[ "${today_epoch}" -gt "${now}" ]]; then
+    echo "${today_epoch}"
+  else
+    TZ=UTC date -d "tomorrow ${time_str}" +%s 2>/dev/null || echo $((now + 3600))
+  fi
+}
+
+# Record the backoff deadline and notify the owner once.
+# Usage: enter_rate_limit_backoff <until_epoch> <result_text>
+enter_rate_limit_backoff() {
+  local until_epoch="$1" result_text="$2"
+  echo "${until_epoch}" > "${RATE_LIMIT_FILE}"
+  local human
+  human=$(date -u -d "@${until_epoch}" '+%Y-%m-%d %H:%M UTC' 2>/dev/null || echo "epoch ${until_epoch}")
+  log "Rate-limit backoff engaged. Pausing Claude invocations until ${human}."
+  notify_owner "Rate-limit backoff" \
+    "Anthropic 429: ${result_text}"$'\n\nClaudius is paused until '"${human}"$'. Will auto-resume.'
+}
+
+# True if a backoff is currently active. Auto-clears expired files.
+is_rate_limited() {
+  [[ -f "${RATE_LIMIT_FILE}" ]] || return 1
+  local until_epoch now
+  until_epoch=$(<"${RATE_LIMIT_FILE}")
+  now=$(date -u +%s)
+  if [[ "${now}" -lt "${until_epoch}" ]]; then
+    return 0
+  fi
+  rm -f "${RATE_LIMIT_FILE}"
+  log "Rate-limit backoff cleared."
+  return 1
+}
+
+# Echo a human-readable remaining duration like "1h23m" or "45s".
+rate_limit_remaining() {
+  local until_epoch now diff
+  until_epoch=$(cat "${RATE_LIMIT_FILE}" 2>/dev/null || echo 0)
+  now=$(date -u +%s)
+  diff=$((until_epoch - now))
+  if [[ "${diff}" -lt 60 ]]; then
+    echo "${diff}s"
+  elif [[ "${diff}" -lt 3600 ]]; then
+    echo "$((diff / 60))m"
+  else
+    echo "$((diff / 3600))h$(( (diff % 3600) / 60 ))m"
+  fi
+}
+
 # Send a periodic usage report email to the owner.
 # Called after each successful invocation; fires every REPORT_EVERY_N invocations.
 maybe_send_usage_report() {
@@ -1144,6 +1223,14 @@ EVOPROMPT
 
   charge_usage "${evo_cost}" "${evo_turns}" "${evo_in}" "${evo_out}" "${evo_cache_read}" "${evo_cache_create}" "evolution"
 
+  if is_rate_limit_error "${evo_output}"; then
+    local evo_rl_result evo_rl_until
+    evo_rl_result=$(echo "${evo_output}" | jq -r '.result // "rate limited"')
+    evo_rl_until=$(parse_rate_limit_reset_epoch "${evo_output}")
+    enter_rate_limit_backoff "${evo_rl_until}" "${evo_rl_result}"
+    return 0
+  fi
+
   if [[ "${evo_exit}" -eq 0 ]]; then
     log "Self-evolution complete. Turns: ${evo_turns}, tokens: $(format_tokens "${evo_in}") in / $(format_tokens "${evo_out}") out."
     # Reload the evolution context for subsequent prompts
@@ -1332,6 +1419,14 @@ INITPROMPT
   init_cache_create=$(echo "${init_output}" | jq '.usage.cache_creation_input_tokens // 0')
 
   charge_usage "${init_cost}" "${init_turns}" "${init_in}" "${init_out}" "${init_cache_read}" "${init_cache_create}" "initiative"
+
+  if is_rate_limit_error "${init_output}"; then
+    local init_rl_result init_rl_until
+    init_rl_result=$(echo "${init_output}" | jq -r '.result // "rate limited"')
+    init_rl_until=$(parse_rate_limit_reset_epoch "${init_output}")
+    enter_rate_limit_backoff "${init_rl_until}" "${init_rl_result}"
+    return 0
+  fi
 
   # Check if Claude actually sent something (reply.txt exists and is recent)
   local result_text
@@ -1568,6 +1663,11 @@ while true; do
     sleep "${POLL_INTERVAL}"; continue
   fi
 
+  if is_rate_limited; then
+    log "Rate-limit backoff active ($(rate_limit_remaining) remaining). Skipping Claude work."
+    sleep "${POLL_INTERVAL}"; continue
+  fi
+
   if ! has_turns; then
     W_USED=$(state_get '.weekly.turns_used // 0')
     D_USED=$(state_get '.budget.turns_used // 0')
@@ -1787,6 +1887,18 @@ EOF
         notify_owner "OAuth refresh failed" \
           "Token refresh failed while processing: ${SUBJECT}"$'\n\nManual intervention needed. Extract fresh credentials and push:\n  ./deploy-fly.sh --secrets'
       fi
+    fi
+
+    # Detect Anthropic-side rate limit (429). Not a task failure — clear
+    # current_task so the message gets a fresh retry budget when quota returns,
+    # set a backoff, and bail out of the batch. Outer loop's gate will skip
+    # work until the named reset time.
+    if is_rate_limit_error "${CLAUDE_OUTPUT}"; then
+      RL_RESULT=$(echo "${CLAUDE_OUTPUT}" | jq -r '.result // "rate limited"')
+      RL_UNTIL=$(parse_rate_limit_reset_epoch "${CLAUDE_OUTPUT}")
+      enter_rate_limit_backoff "${RL_UNTIL}" "${RL_RESULT}"
+      state_update '.current_task = null'
+      break
     fi
 
     # Parse actual cost, turns, and token usage from JSON response
