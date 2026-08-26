@@ -194,7 +194,18 @@ push_archive() {
 
   git -C "${ARCHIVE_DIR}" add -A
   git -C "${ARCHIVE_DIR}" commit -m "archive: ${count} email(s) — $(date -u '+%Y-%m-%d %H:%M UTC')" 2>/dev/null || return 0
-  git -C "${ARCHIVE_DIR}" push 2>/dev/null \
-    || log "archive: WARNING — push failed (will retry next cycle)"
-  log "archive: Pushed ${count} email(s) to ${ARCHIVE_REPO}"
+  # Report what happened, not what was hoped for. The success line used to sit
+  # outside the || branch, so a failed push logged a warning and then announced
+  # success anyway -- and 2>/dev/null ate the reason. Every push failed for six
+  # months (no credential: gh reads GH_TOKEN from the env, plain git does not)
+  # while the log said "Pushed N email(s)" each time.
+  local push_err
+  if push_err=$(git -C "${ARCHIVE_DIR}" push 2>&1); then
+    log "archive: pushed ${count} email(s) to ${ARCHIVE_REPO}"
+  else
+    # Whole error on one line, not a slice of it: git puts the actionable line
+    # FIRST ("fatal: could not read Username...") and boilerplate last, so taking
+    # the last line reliably reports the least useful part.
+    log "archive: WARNING — push FAILED (retrying next cycle): $(printf '%s' "${push_err}" | tr '\n' ' ' | cut -c1-300)"
+  fi
 }
