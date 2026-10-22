@@ -48,6 +48,38 @@ INITIATIVE_MAX_TURNS="${INITIATIVE_MAX_TURNS:-8}"
 INITIATIVE_COOLDOWN_HOURS="${INITIATIVE_COOLDOWN_HOURS:-24}"
 INITIATIVE_STATE_FILE="/workspace/logs/initiative-state.json"
 
+# ── Graceful shutdown ────────────────────────────────────────────
+# `docker compose stop` sends SIGTERM then SIGKILLs after 10s. Bash runs
+# `sleep` as a child process and queues signal traps until the current
+# command returns — so a plain `sleep "${POLL_INTERVAL}"` swallows the
+# SIGTERM for the full interval and we fall into SIGKILL. Exit 137 looks
+# like a crash to /opt/docker-watchdog.sh on the OCI VPS, which `docker
+# start`s us within 15 minutes (its filter is "nonzero exit code") — so a
+# human "stop" doesn't actually stay stopped. The fix: wrap `sleep` in a
+# background+wait pattern so the trap can kill the child and the shell
+# returns from `wait` immediately, then exit 0 on the next loop iteration.
+# Exit 0 is also what the watchdog's own filter excludes, closing the loop.
+SHUTDOWN=0
+_sleep_pid=
+on_term() {
+  SHUTDOWN=1
+  # `log` isn't defined until later in the file, so use raw echo — a trap
+  # can fire before/after helper definitions and we don't want a signal
+  # handler to crash because its logger isn't loaded yet.
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] SIGTERM/INT received — shutting down cleanly after current step."
+  [[ -n "${_sleep_pid}" ]] && kill "${_sleep_pid}" 2>/dev/null || true
+}
+trap on_term TERM INT
+
+interruptible_sleep() {
+  sleep "$1" &
+  _sleep_pid=$!
+  # `wait` returns 128+signo if killed by trap; `|| true` neutralises
+  # set -e so a trap-interrupted sleep doesn't look like a failure.
+  wait "${_sleep_pid}" 2>/dev/null || true
+  _sleep_pid=
+}
+
 # ── Helpers ──────────────────────────────────────────────────────
 
 log() {
@@ -1533,6 +1565,10 @@ fi
 LOOP_COUNT=0
 
 while true; do
+  if [[ "${SHUTDOWN}" -eq 1 ]]; then
+    log "Clean exit on SIGTERM (watchdog won't restart exit 0)."
+    exit 0
+  fi
   LOOP_COUNT=$((LOOP_COUNT + 1))
   log "── Poll #${LOOP_COUNT} ──────────────────────────────────"
 
@@ -1565,7 +1601,7 @@ while true; do
 
   if ! is_active_hours; then
     log "Outside active hours (${ACTIVE_HOURS_UTC}). Sleeping..."
-    sleep "${POLL_INTERVAL}"; continue
+    interruptible_sleep "${POLL_INTERVAL}"; continue
   fi
 
   if ! has_turns; then
@@ -1574,7 +1610,7 @@ while true; do
     D_ALLOW=$(calculate_daily_allowance)
     log "Turn quota reached (weekly: ${W_USED}/${WEEKLY_TURN_QUOTA}, today: ${D_USED}/${D_ALLOW})."
     notify_quota_exhausted
-    sleep "${POLL_INTERVAL}"; continue
+    interruptible_sleep "${POLL_INTERVAL}"; continue
   fi
 
   # Fetch unread emails from anyone
@@ -1589,7 +1625,7 @@ while true; do
     fi
     maybe_initiate
     log "Sleeping ${POLL_INTERVAL}s..."
-    sleep "${POLL_INTERVAL}"
+    interruptible_sleep "${POLL_INTERVAL}"
     continue
   fi
 
